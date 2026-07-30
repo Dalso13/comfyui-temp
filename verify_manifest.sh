@@ -42,6 +42,25 @@ if [[ ! -f "$MANIFEST" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
+# CRLF 방어. Windows 에서 편집/체크아웃되면 마지막 필드에 \r 이 붙어
+# 숫자 비교가 전부 실패하고, 출력도 커서가 되돌아가 깨집니다.
+# 읽기용 정규화 사본을 만들어 그쪽에서만 파싱합니다.
+# ---------------------------------------------------------------------------
+CRLF=0
+if grep -q $'\r' "$MANIFEST" 2>/dev/null; then
+  CRLF=1
+  echo "경고: 매니페스트가 CRLF 개행입니다. 읽을 때는 정규화하지만," >&2
+  echo "      .gitattributes 로 LF 를 강제하고 아래를 1회 실행하세요:" >&2
+  echo "        git add --renormalize . && git commit -m 'normalize to LF'" >&2
+  echo "      그러지 않으면 부트스트랩 .sh 가 리눅스에서 실행되지 않습니다." >&2
+  echo >&2
+fi
+
+NORM="$(mktemp)"
+trap 'rm -f "$NORM" "${TMP:-}"' EXIT
+tr -d '\r' < "$MANIFEST" > "$NORM"
+
+# ---------------------------------------------------------------------------
 # URL 하나의 크기를 조회. 성공 시 바이트 수를 stdout 으로, 실패 시 빈 문자열.
 # HF 의 LFS 파일은 리다이렉트되므로 -L 로 따라가고, x-linked-size 를 우선합니다.
 # HEAD 를 거부하는 서버는 1바이트 range GET 으로 폴백합니다.
@@ -84,7 +103,7 @@ printf '매니페스트: %s\n\n' "$MANIFEST"
 printf '%-10s %-6s %-9s %s\n' "TRACK" "STAGE" "SIZE(GB)" "FILE"
 printf '%s\n' "----------------------------------------------------------------------"
 
-TMP="$(mktemp)"; trap 'rm -f "$TMP"' EXIT
+TMP="$(mktemp)"
 declare -A TRACK_TOTAL
 fail=0; todo=0; ok=0
 
@@ -112,7 +131,7 @@ while IFS=$'\t' read -r track stage dest filename url bytes || [[ -n "${track:-}
     fi
     printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$track" "$stage" "$dest" "$filename" "$url" "$size" >> "$TMP"
   fi
-done < "$MANIFEST"
+done < "$NORM"
 
 # ---------------------------------------------------------------------------
 common=${TRACK_TOTAL[common]:-0}
@@ -134,6 +153,11 @@ for t in anime realistic both; do
   esac
   awk -v s="$s" -v n="$t" 'BEGIN{ if (s==0) {printf "  %-10s  (측정 불가)\n", n} else {printf "  %-10s  %d GB\n", n, int(s/1073741824*1.4)+10} }'
 done
+
+if [[ $todo -gt 0 || $fail -gt 0 ]]; then
+  printf '\n  ** 위 수치는 과소집계입니다. 미확정/실패 %d 건이 빠져 있습니다.\n' "$((todo + fail))"
+  printf '     디스크 크기는 전부 정상이 된 뒤의 값으로 결정하세요.\n'
+fi
 
 printf '\n결과: 정상 %d / 실패 %d / 미확정 %d\n' "$ok" "$fail" "$todo"
 
