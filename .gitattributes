@@ -1,0 +1,21 @@
+# 이 레포의 산출물은 전부 리눅스 컨테이너에서 실행됩니다.
+# Windows 에서 편집하더라도 저장소와 체크아웃은 항상 LF 를 유지해야 합니다.
+#
+# 이걸 하지 않으면:
+#   - .sh 가 CRLF 로 체크아웃되어 리눅스에서 bash: $'\r': command not found
+#   - .tsv 의 마지막 필드에 \r 이 붙어 숫자 비교가 항상 실패 (멱등성 붕괴)
+
+* text=auto eol=lf
+
+*.sh   text eol=lf
+*.tsv  text eol=lf
+*.json text eol=lf
+*.md   text eol=lf
+*.yaml text eol=lf
+*.yml  text eol=lf
+
+# 바이너리는 변환 금지
+*.safetensors binary
+*.png  binary
+*.jpg  binary
+*.mp4  binary
