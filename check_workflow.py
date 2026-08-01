@@ -107,11 +107,18 @@ def parse_ui(data):
     nodes = {}
     for n in data.get("nodes", []):
         nodes[n.get("id")] = n
-    # links: [link_id, origin_node, origin_slot, target_node, target_slot, type]
+    # 링크 스키마가 두 가지입니다.
+    #   최상위 그래프 : [link_id, origin_node, origin_slot, target_node, target_slot, type]
+    #   서브그래프    : {"id":.., "origin_id":.., "target_id":.., ...}
+    # 후자를 처리하지 않으면 체인 추적이 통째로 실패하고, 검사가 조용히 통과합니다.
     links = {}
     for l in data.get("links", []) or []:
         if isinstance(l, list) and len(l) >= 6:
             links[l[0]] = {"from": l[1], "to": l[3], "type": l[5]}
+        elif isinstance(l, dict) and "id" in l:
+            links[l["id"]] = {"from": l.get("origin_id"),
+                              "to": l.get("target_id"),
+                              "type": l.get("type")}
     return nodes, links
 
 
@@ -146,61 +153,92 @@ def trace_model_chain_ui(nodes, links, sampler_id):
     """
     샘플러의 model 입력에서 UNETLoader 까지 거슬러 올라가며
     경유한 LoRA 목록과 최종 UNET 파일명을 수집합니다.
+
+    공식 템플릿은 Lightning LoRA 사용 여부를 ComfySwitchNode 로 토글합니다.
+    이 노드의 입력은 'model' 이 아니라 on_true / on_false 라, 이름만 보고
+    따라가면 여기서 추적이 끊깁니다. 분기 양쪽을 모두 훑어야 합니다.
     """
     loras = []
     unet = None
-    cur = ui_input_source(nodes, links, sampler_id, "model")
+    stack = [ui_input_source(nodes, links, sampler_id, "model")]
     seen = set()
-    while cur is not None and cur not in seen:
+    while stack:
+        cur = stack.pop()
+        if cur is None or cur in seen:
+            continue
         seen.add(cur)
         n = nodes.get(cur)
         if not n:
-            break
+            continue
         t = n.get("type")
         if t in ("LoraLoaderModelOnly", "LoraLoader"):
             name = ui_widget(n, 0)
-            if name:
+            if name and name not in loras:
                 loras.append(name)
-            cur = ui_input_source(nodes, links, cur, "model")
+            stack.append(ui_input_source(nodes, links, cur, "model"))
         elif t == "UNETLoader":
-            unet = ui_widget(n, 0)
-            break
-        elif t in MODEL_PASSTHROUGH:
-            cur = ui_input_source(nodes, links, cur, "model")
+            unet = unet or ui_widget(n, 0)
         else:
-            cur = ui_input_source(nodes, links, cur, "model")
+            # model 입력이 있으면 따라가고, 없으면 모든 입력을 훑습니다
+            # (스위치/리라우트류는 입력 이름이 제각각입니다)
+            nxt = ui_input_source(nodes, links, cur, "model")
+            if nxt is not None:
+                stack.append(nxt)
+            else:
+                for inp in n.get("inputs", []) or []:
+                    lid = inp.get("link")
+                    if lid is not None and lid in links:
+                        if inp.get("type") in (None, "MODEL", "*"):
+                            stack.append(links[lid]["from"])
     return unet, loras
 
 
 def collect_ui(data, rep):
-    nodes, links = parse_ui(data)
-    referenced = []
+    """
+    UI 포맷 수집.
 
-    for nid, n in nodes.items():
-        t = n.get("type")
-        if t in LOADER_WIDGET_INDEX:
-            name = ui_widget(n, LOADER_WIDGET_INDEX[t])
-            if name:
-                referenced.append((name, t))
+    최신 ComfyUI 공식 템플릿은 실제 노드를 definitions.subgraphs 안에 넣습니다
+    (최상위에는 LoadImage / SaveVideo / 서브그래프 인스턴스만 남습니다).
+    이걸 안 보면 로더도 샘플러도 0개로 잡혀 "통과"로 잘못 판정됩니다.
+    최상위 그래프와 각 서브그래프를 모두 같은 방식으로 훑습니다.
+    """
+    graphs = [("main", data)]
+    for sg in (data.get("definitions") or {}).get("subgraphs", []) or []:
+        graphs.append((sg.get("name") or "subgraph", sg))
+    if len(graphs) > 1:
+        names = ", ".join(n for n, _ in graphs[1:])
+        rep.info(f"서브그래프 {len(graphs)-1}개 포함: {names}")
 
-    # 샘플러별 모델 체인 추적
-    chains = []
-    for nid, n in nodes.items():
-        if n.get("type") in SAMPLER_TYPES:
-            unet, loras = trace_model_chain_ui(nodes, links, nid)
-            if unet or loras:
-                chains.append({"sampler": nid, "unet": unet, "loras": loras})
+    referenced, chains, dims = [], [], []
 
-    # 해상도 / 프레임 수
-    dims = []
-    for nid, n in nodes.items():
-        t = n.get("type") or ""
-        if t in ("WanImageToVideo", "WanAnimateToVideo", "WanFirstLastFrameToVideo",
-                 "EmptyHunyuanLatentVideo", "EmptyLatentVideo"):
-            wv = n.get("widgets_values")
-            if isinstance(wv, list):
-                nums = [v for v in wv if isinstance(v, (int, float))]
-                dims.append((t, nums))
+    for gname, g in graphs:
+        nodes, links = parse_ui(g)
+        if not nodes:
+            continue
+
+        for nid, n in nodes.items():
+            t = n.get("type")
+            if t in LOADER_WIDGET_INDEX:
+                name = ui_widget(n, LOADER_WIDGET_INDEX[t])
+                if name:
+                    referenced.append((name, t))
+
+        for nid, n in nodes.items():
+            if n.get("type") in SAMPLER_TYPES:
+                unet, loras = trace_model_chain_ui(nodes, links, nid)
+                if unet or loras:
+                    label = nid if gname == "main" else f"{nid} ({gname})"
+                    chains.append({"sampler": label, "unet": unet, "loras": loras})
+
+        for nid, n in nodes.items():
+            t = n.get("type") or ""
+            if t in ("WanImageToVideo", "WanAnimateToVideo", "WanFirstLastFrameToVideo",
+                     "EmptyHunyuanLatentVideo", "EmptyLatentVideo"):
+                wv = n.get("widgets_values")
+                if isinstance(wv, list):
+                    nums = [v for v in wv if isinstance(v, (int, float))]
+                    dims.append((t, nums))
+
     return referenced, chains, dims
 
 

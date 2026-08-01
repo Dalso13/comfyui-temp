@@ -1,457 +1,484 @@
-#!/usr/bin/env bash
-#
-# bootstrap.sh — RunPod Pod 에서 ComfyUI 작업 환경을 1회 구성합니다.
-#
-# 설계 원칙 (합의된 4개):
-#   1) 스크립트 1개 + 트랙 인자          (anime / realistic / both)
-#   2) 가장 큰 다운로드를 백그라운드 선행 (네트워크 병목과 CPU 병목을 겹침)
-#   3) 트랙별 디스크 프로비저닝           (프리플라이트에서 부족하면 즉시 중단)
-#   4) wget 목적지 직접 다운로드          (HF 캐시 이중 점유 회피)
-#
-# 사용법:
-#   bash bootstrap.sh anime
-#   bash bootstrap.sh realistic --jobs 2
-#   bash bootstrap.sh both --strict
-#
-# 옵션:
-#   --jobs N       동시 다운로드 수 (기본 3)
-#   --strict       TODO/누락 항목이 있으면 진행하지 않음
-#   --skip-nodes   커스텀 노드 설치 건너뛰기 (모델만 다시 받을 때)
-#   --update-comfy ComfyUI git pull 시도 (기본 꺼짐 — 아래 설명 참고)
-#   --quiet-dl     다운로드 진행률 표시 끄기
-#   --dry-run      실제 다운로드/설치 없이 계획만 출력
-#
-# ComfyUI 업데이트가 기본 꺼짐인 이유:
-#   RunPod 공식 ComfyUI 템플릿은 검증된 커밋에 detached HEAD 로 고정돼 있습니다.
-#   추적 브랜치가 없어 git pull 이 실패하고, 억지로 최신으로 끌어올리면
-#   템플릿이 검증한 조합(CUDA/torch/노드)을 깨뜨릴 위험만 생깁니다.
-#   템플릿이 이미 버전을 고정해 주므로 재현성 측면에서도 이쪽이 낫습니다.
-#   직접 빌드한 이미지처럼 추적 브랜치가 있는 환경에서만 --update-comfy 를 쓰세요.
-#
-# 환경변수:
-#   COMFY_ROOT     ComfyUI 경로 자동탐지 실패 시 직접 지정
-#   HF_TOKEN       게이트된 HF 저장소용 (선택)
-#
-set -uo pipefail
+#!/usr/bin/env python3
+"""
+check_workflow.py — 워크플로우 JSON 을 매니페스트와 대조 검증합니다.
 
-# ---------------------------------------------------------------------------
-# 이 스크립트는 Pod(리눅스) 전용입니다. 백그라운드 디스패처가 `wait -n`(bash 4.3+)에
-# 의존하고, 경로 탐지/디스크 검사도 컨테이너를 전제로 합니다.
-# macOS 기본 bash 는 3.2 라 여기서 걸립니다. 로컬 검증용 도구는
-# verify_manifest.sh 와 check_workflow.py 쪽입니다.
-# ---------------------------------------------------------------------------
-if [[ -z "${BASH_VERSINFO:-}" ]] || (( BASH_VERSINFO[0] < 4 )) \
-   || { (( BASH_VERSINFO[0] == 4 )) && (( BASH_VERSINFO[1] < 3 )); }; then
-  echo "이 스크립트는 bash 4.3 이상이 필요합니다 (현재: ${BASH_VERSION:-unknown})" >&2
-  echo "  bootstrap.sh 는 RunPod Pod 안에서 실행하는 용도입니다." >&2
-  echo "  로컬 검증은 verify_manifest.sh / check_workflow.py 를 쓰세요." >&2
-  exit 1
-fi
+Pod 을 띄우기 전에 로컬에서 돌리는 것이 목적입니다. GPU 요금 0원 구간에서
+잡을 수 있는 실수를 여기서 전부 걸러냅니다.
 
-# ===========================================================================
-# 커스텀 노드 정의
-#
-# COMMIT 을 비워두면 기본 브랜치를 따라갑니다. ComfyUI 코어는 "항상 최신"으로
-# 결정했지만, 노드는 코어보다 훨씬 자주 깨집니다. 한 번 정상 동작을 확인한
-# 뒤에는 그때의 커밋 해시를 여기 박아 고정하세요. (bootstrap 이 세션 종료 시
-# 현재 커밋을 로그에 남기므로 그 값을 그대로 복사하면 됩니다.)
-# ===========================================================================
-NODES_COMMON=(
-  "ComfyUI-Manager|https://github.com/Comfy-Org/ComfyUI-Manager.git|"
+검사 항목:
+  1) 워크플로우가 참조하는 모델 파일이 매니페스트에 있는가
+     -> 없으면 Pod 에서 로더 드롭다운이 비어 있게 됩니다
+  2) 매니페스트에 있는데 워크플로우가 안 쓰는 파일은 무엇인가
+     -> 헛되이 받는 용량
+  3) high/low noise LoRA 가 올바른 샘플러 쪽에 물려 있는가
+     -> 어긋나면 고스팅(이중 노출)이 납니다. 눈으로는 못 잡습니다.
+  4) 프레임 수가 4n+1 인가, 해상도가 16 배수인가
+
+사용법:
+  python3 check_workflow.py workflows/anime_i2v.json
+  python3 check_workflow.py --manifest manifest.tsv workflows/*.json
+  python3 check_workflow.py --track anime workflows/anime_i2v.json
+"""
+
+import argparse
+import json
+import os
+import re
+import sys
+
+# 모델 파일명을 담는 로더 노드들.
+# 값은 UI 포맷에서 widgets_values 의 몇 번째가 파일명인지.
+LOADER_WIDGET_INDEX = {
+    "UNETLoader": 0,
+    "LoraLoaderModelOnly": 0,
+    "LoraLoader": 0,
+    "CLIPLoader": 0,
+    "VAELoader": 0,
+    "CLIPVisionLoader": 0,
+    "CheckpointLoaderSimple": 0,
+    "DualCLIPLoader": 0,
+}
+
+# API 포맷에서 파일명이 들어가는 입력 키
+API_FILE_KEYS = (
+    "unet_name", "lora_name", "clip_name", "vae_name",
+    "clip_name1", "clip_name2", "ckpt_name", "model_name",
 )
-NODES_REALISTIC=(
-  "ComfyUI-KJNodes|https://github.com/kijai/ComfyUI-KJNodes.git|"
-  "comfyui_controlnet_aux|https://github.com/Fannovel16/comfyui_controlnet_aux.git|"
-  "ComfyUI-segment-anything-2|https://github.com/kijai/ComfyUI-segment-anything-2.git|"
-)
-# 애니 트랙은 내장 템플릿만 쓰므로 추가 노드가 없습니다.
-NODES_ANIME=()
 
-# ===========================================================================
-TRACK=""
-JOBS=3
-STRICT=0
-SKIP_NODES=0
-UPDATE_COMFY=0
-QUIET_DL=0
-DRY=0
+MODEL_PASSTHROUGH = {"LoraLoaderModelOnly", "LoraLoader", "ModelSamplingSD3",
+                     "ModelSamplingAuraFlow", "PathchSageAttentionKJ",
+                     "ModelPatchTorchSettings"}
 
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    anime|realistic|both) TRACK="$1"; shift ;;
-    --jobs)         JOBS="${2:-3}"; shift 2 ;;
-    --strict)       STRICT=1; shift ;;
-    --skip-nodes)   SKIP_NODES=1; shift ;;
-    --update-comfy) UPDATE_COMFY=1; shift ;;
-    --skip-update)  shift ;;   # 하위호환: 이제 기본이 건너뛰기라 무시
-    --quiet-dl)     QUIET_DL=1; shift ;;
-    --dry-run)      DRY=1; shift ;;
-    -h|--help)      sed -n '2,40p' "$0"; exit 0 ;;
-    *) echo "알 수 없는 인자: $1" >&2; exit 2 ;;
-  esac
-done
+SAMPLER_TYPES = {"KSamplerAdvanced", "KSampler", "SamplerCustom",
+                 "SamplerCustomAdvanced"}
 
-if [[ -z "$TRACK" ]]; then
-  echo "트랙을 지정하세요: anime | realistic | both" >&2
-  echo "  예) bash bootstrap.sh anime" >&2
-  exit 2
-fi
 
-REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-MANIFEST="$REPO_DIR/manifest.tsv"
-LOG_DIR="$REPO_DIR/logs"
-STAMP="$(date +%Y%m%d_%H%M%S)"
-START_EPOCH="$(date +%s)"
-mkdir -p "$LOG_DIR"
-LOG="$LOG_DIR/bootstrap_${TRACK}_${STAMP}.log"
+class Report:
+    def __init__(self):
+        self.errors = []
+        self.warns = []
+        self.infos = []
 
-log()  { printf '%s\n' "$*" | tee -a "$LOG"; }
-warn() { printf '  ! %s\n' "$*" | tee -a "$LOG" >&2; }
-die()  { printf '\n중단: %s\n' "$*" | tee -a "$LOG" >&2; exit 1; }
+    def err(self, m):
+        self.errors.append(m)
 
-log "=========================================================="
-log " bootstrap  track=$TRACK  jobs=$JOBS  $(date '+%F %T')"
-log " log: $LOG"
-log "=========================================================="
+    def warn(self, m):
+        self.warns.append(m)
 
-[[ -f "$MANIFEST" ]] || die "매니페스트가 없습니다: $MANIFEST"
+    def info(self, m):
+        self.infos.append(m)
 
-# CRLF 방어. 읽기용 정규화 사본에서만 파싱합니다.
-NORM="$(mktemp)"; PLAN="$(mktemp)"
-trap 'rm -f "$NORM" "$PLAN"' EXIT
-if grep -q $'\r' "$MANIFEST"; then
-  warn "매니페스트가 CRLF 입니다. 읽기는 정규화하지만 .gitattributes 로 LF 를 강제하세요."
-fi
-tr -d '\r' < "$MANIFEST" > "$NORM"
+    def ok(self):
+        return not self.errors
 
-# ===========================================================================
-# 1. ComfyUI 경로 탐지
-#    템플릿마다 설치 위치가 다르고, 볼륨 밖에 깔려 있으면 Terminate 시
-#    전부 사라집니다. 여기서 확실히 잡고 갑니다.
-# ===========================================================================
-detect_comfy() {
-  [[ -n "${COMFY_ROOT:-}" ]] && { echo "$COMFY_ROOT"; return; }
-  local c
-  for c in /workspace/ComfyUI /workspace/comfyui /ComfyUI /comfyui \
-           /opt/ComfyUI /root/ComfyUI "$HOME/ComfyUI"; do
-    [[ -f "$c/main.py" ]] && { echo "$c"; return; }
-  done
-  # 마지막 수단: main.py 를 얕게 탐색
-  c="$(find /workspace / -maxdepth 3 -name main.py -path '*omfy*' 2>/dev/null | head -1)"
-  [[ -n "$c" ]] && { dirname "$c"; return; }
-  echo ""
-}
 
-COMFY="$(detect_comfy)"
-[[ -n "$COMFY" ]] || die "ComfyUI 경로를 찾지 못했습니다. COMFY_ROOT=/경로 로 지정하세요."
-log ""
-log "[1/6] ComfyUI 경로"
-log "      $COMFY"
+def load_manifest(path):
+    """매니페스트에서 filename -> (track, stage) 를 만듭니다."""
+    known = {}
+    if not os.path.isfile(path):
+        return None
+    with open(path, "r", encoding="utf-8") as fh:
+        for raw in fh:
+            line = raw.replace("\r", "").rstrip("\n")
+            if not line or line.lstrip().startswith("#"):
+                continue
+            parts = line.split("\t")
+            if len(parts) < 6:
+                continue
+            track, stage, dest, filename, url, _bytes = parts[:6]
+            known[filename] = (track, stage, url)
+    return known
 
-MODELS="$COMFY/models"
-mkdir -p "$MODELS"
 
-# /workspace 아래인지 = Terminate 후에도 남는 위치인지 확인
-case "$COMFY" in
-  /workspace/*) log "      /workspace 하위 (정상)" ;;
-  *) warn "ComfyUI 가 /workspace 밖에 있습니다. 볼륨을 쓰신다면 여기 받은 모델은 Pod 삭제 시 사라집니다." ;;
-esac
+def detect_format(data):
+    if isinstance(data, dict) and "nodes" in data and isinstance(data["nodes"], list):
+        return "ui"
+    if isinstance(data, dict) and data and all(
+        isinstance(v, dict) and "class_type" in v for v in data.values()
+    ):
+        return "api"
+    return "unknown"
 
-# clip_vision vs clip_visions 자동 감지
-CLIP_DIR="clip_vision"
-if [[ -d "$MODELS/clip_visions" && ! -d "$MODELS/clip_vision" ]]; then
-  CLIP_DIR="clip_visions"
-fi
-log "      clip vision 디렉토리: $CLIP_DIR"
-
-# ===========================================================================
-# 2. 다운로드 계획 수립 (트랙 필터 + 멱등성 판정 + 큰 것부터 정렬)
-# ===========================================================================
-log ""
-log "[2/6] 다운로드 계획"
-
-todo_rows=0; skip_rows=0; need_bytes=0
-while IFS=$'\t' read -r track stage dest filename url bytes || [[ -n "${track:-}" ]]; do
-  [[ -z "${track:-}" || "${track:0:1}" == "#" ]] && continue
-  [[ "$track" == "common" || "$track" == "$TRACK" || "$TRACK" == "both" ]] || continue
-
-  if [[ "$url" == TODO* ]]; then
-    warn "URL 미확정, 건너뜁니다: $filename ($url)"
-    todo_rows=$((todo_rows+1))
-    continue
-  fi
-
-  [[ "$dest" == "clip_vision" || "$dest" == "clip_visions" ]] && dest="$CLIP_DIR"
-  target="$MODELS/$dest/$filename"
-
-  if [[ -f "$target" ]]; then
-    actual="$(stat -c %s "$target" 2>/dev/null || stat -f %z "$target" 2>/dev/null || echo 0)"
-    if [[ "$bytes" == "0" ]]; then
-      # 매니페스트에 기대 크기가 없어 검증 불가. wget -c 가 원격 크기와
-      # 비교해 완결이면 즉시 종료하므로 재전송은 일어나지 않습니다.
-      warn "크기 미검증(bytes=0), wget -c 로 확인: $filename  <- verify_manifest.sh --fix 를 먼저 돌리세요"
-    elif [[ "$actual" == "$bytes" ]]; then
-      skip_rows=$((skip_rows+1)); continue          # 완전 일치 -> 건너뜀
-    else
-      warn "크기 불일치, 이어받기: $filename (로컬 $actual / 기대 $bytes)"
-    fi
-  fi
-
-  printf '%s\t%s\t%s\t%s\n' "${bytes:-0}" "$target" "$url" "$filename" >> "$PLAN"
-  need_bytes=$(( need_bytes + ${bytes:-0} ))
-done < "$NORM"
-
-# 큰 파일부터: 가장 무거운 전송을 먼저 백그라운드에 띄워야 뒤의 CPU 작업에 가려집니다
-if [[ -s "$PLAN" ]]; then
-  sort -t$'\t' -k1,1nr -o "$PLAN" "$PLAN"
-fi
-dl_count=$(wc -l < "$PLAN" | tr -d ' ')
-
-log "      받을 파일 $dl_count 개 / 이미 있음 $skip_rows 개 / 미확정 $todo_rows 개"
-log "      필요 용량 $(awk -v b="$need_bytes" 'BEGIN{printf "%.2f", b/1073741824}') GiB"
-
-if [[ $todo_rows -gt 0 && $STRICT -eq 1 ]]; then
-  die "--strict: URL 미확정 항목이 $todo_rows 개 있습니다."
-fi
-
-# ===========================================================================
-# 3. 프리플라이트 — 30초 안에 실패를 알아야 합니다
-# ===========================================================================
-log ""
-log "[3/6] 프리플라이트"
-
-avail_kb="$(df -Pk "$MODELS" | awk 'NR==2{print $4}')"
-avail_b=$(( avail_kb * 1024 ))
-log "      디스크 여유 $(awk -v b="$avail_b" 'BEGIN{printf "%.1f", b/1073741824}') GiB"
-if [[ $need_bytes -gt 0 ]]; then
-  # 생성 중 임시파일/출력물 여유로 5GiB 를 더 요구합니다
-  require=$(( need_bytes + 5 * 1073741824 ))
-  if [[ $avail_b -lt $require ]]; then
-    die "디스크 부족. 필요 $(awk -v b="$require" 'BEGIN{printf "%.1f",b/1073741824}') GiB / 여유 $(awk -v b="$avail_b" 'BEGIN{printf "%.1f",b/1073741824}') GiB
-     Pod 을 더 큰 볼륨 디스크로 다시 배포하세요."
-  fi
-fi
-
-command -v wget >/dev/null || die "wget 이 없습니다. apt-get install -y wget"
-command -v git  >/dev/null || die "git 이 없습니다."
-
-# ComfyUI 가 실제로 쓰는 파이썬을 찾습니다.
-# 템플릿이 venv 를 쓰는데 시스템 python 에 설치하면 노드가 의존성을 못 찾아
-# 기동 시 조용히 import 에러가 납니다. 가장 잡기 어려운 종류의 실패입니다.
-detect_python() {
-  local c
-  for c in "$COMFY/venv/bin/python" "$COMFY/.venv/bin/python" \
-           /workspace/venv/bin/python /workspace/.venv/bin/python; do
-    [[ -x "$c" ]] && { echo "$c"; return; }
-  done
-  command -v python3 || command -v python
-}
-PY="$(detect_python)"
-[[ -n "$PY" ]] || die "파이썬을 찾지 못했습니다."
-log "      python: $PY"
-
-# PEP 668(externally-managed-environment) 대응. venv 면 불필요하지만
-# 시스템 파이썬이면 --break-system-packages 가 필요합니다.
-PIP_EXTRA=""
-if ! "$PY" -m pip install --dry-run --quiet --no-input pip >/dev/null 2>&1; then
-  if "$PY" -m pip install --dry-run --quiet --no-input --break-system-packages pip >/dev/null 2>&1; then
-    PIP_EXTRA="--break-system-packages"
-    log "      pip: --break-system-packages 사용 (시스템 파이썬)"
-  fi
-fi
-if command -v nvidia-smi >/dev/null; then
-  log "      GPU: $(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader | head -1)"
-else
-  warn "nvidia-smi 없음. GPU 미인식 상태일 수 있습니다."
-fi
-
-if [[ $DRY -eq 1 ]]; then
-  log ""
-  log "[dry-run] 다음을 받을 예정입니다:"
-  awk -F'\t' '{printf "  %8.2f GiB  %s\n", $1/1073741824, $4}' "$PLAN" | tee -a "$LOG"
-  log ""
-  log "[dry-run] 종료. 실제 실행은 --dry-run 을 빼고 다시 돌리세요."
-  exit 0
-fi
-
-# ===========================================================================
-# 4. 다운로드 백그라운드 착수 (여기서 즉시 시작해야 5~7분이 나옵니다)
-# ===========================================================================
-log ""
-log "[4/6] 다운로드 시작 (백그라운드, 동시 $JOBS)"
-
-DL_LOG_DIR="$LOG_DIR/downloads_$STAMP"
-mkdir -p "$DL_LOG_DIR"
-FAIL_FLAG="$(mktemp)"
-
-download_one() {
-  local bytes="$1" target="$2" url="$3" name="$4"
-  local auth=() prog=(-q)
-  [[ -n "${HF_TOKEN:-}" && "$url" == *huggingface.co* ]] && auth=(--header="Authorization: Bearer $HF_TOKEN")
-  # 진행률: 로그 파일로 가므로 병렬 출력이 섞이지 않습니다.
-  # tail -f 로 개별 파일 진행을 볼 수 있게 하는 것이 목적입니다.
-  [[ $QUIET_DL -eq 0 ]] && prog=(-q --show-progress --progress=dot:giga)
-  mkdir -p "$(dirname "$target")"
-  if wget -c "${prog[@]}" --tries=3 --timeout=60 ${auth[@]+"${auth[@]}"} -O "$target" "$url" \
-        >"$DL_LOG_DIR/$name.log" 2>&1; then
-    if [[ "$bytes" != "0" ]]; then
-      local got; got="$(stat -c %s "$target" 2>/dev/null || echo 0)"
-      if [[ "$got" != "$bytes" ]]; then
-        echo "$name 크기 불일치 (기대 $bytes / 실제 $got)" >> "$FAIL_FLAG"
-        return 1
-      fi
-    fi
-    return 0
-  fi
-  echo "$name 다운로드 실패 (로그: $DL_LOG_DIR/$name.log)" >> "$FAIL_FLAG"
-  return 1
-}
 
 # ---------------------------------------------------------------------------
-# 디스패처를 백그라운드로 통째로 분리합니다.
-#
-# 이전 버전은 이 자리에서 동시 실행 수를 기다렸습니다. 그래서 파일이 JOBS 개를
-# 넘으면 4번째부터 이 루프에 갇혀, 아래 [5/6] 의 CPU 작업이 다운로드가 끝날
-# 때까지 시작조차 못 했습니다. 병렬화의 목적이 정확히 무산되는 구조였습니다.
-# 이제 대기는 디스패처 안에서만 일어나고 메인 셸은 즉시 다음 단계로 갑니다.
+# UI 포맷 파싱
 # ---------------------------------------------------------------------------
-DISPATCH_PID=""
-if [[ $dl_count -gt 0 ]]; then
-  while IFS=$'\t' read -r bytes target url name; do
-    log "      -> $name ($(awk -v b="$bytes" 'BEGIN{printf "%.2f", b/1073741824}') GiB)"
-  done < "$PLAN"
+def parse_ui(data):
+    nodes = {}
+    for n in data.get("nodes", []):
+        nodes[n.get("id")] = n
+    # 링크 스키마가 두 가지입니다.
+    #   최상위 그래프 : [link_id, origin_node, origin_slot, target_node, target_slot, type]
+    #   서브그래프    : {"id":.., "origin_id":.., "target_id":.., ...}
+    # 후자를 처리하지 않으면 체인 추적이 통째로 실패하고, 검사가 조용히 통과합니다.
+    links = {}
+    for l in data.get("links", []) or []:
+        if isinstance(l, list) and len(l) >= 6:
+            links[l[0]] = {"from": l[1], "to": l[3], "type": l[5]}
+        elif isinstance(l, dict) and "id" in l:
+            links[l["id"]] = {"from": l.get("origin_id"),
+                              "to": l.get("target_id"),
+                              "type": l.get("type")}
+    return nodes, links
 
-  (
-    running=0
-    while IFS=$'\t' read -r bytes target url name; do
-      while (( running >= JOBS )); do
-        wait -n 2>/dev/null || true
-        running=$((running-1))
-      done
-      download_one "$bytes" "$target" "$url" "$name" &
-      running=$((running+1))
-    done < "$PLAN"
-    wait
-  ) &
-  DISPATCH_PID=$!
-  log "      (백그라운드 진행. 개별 진행률: tail -f $DL_LOG_DIR/<파일명>.log)"
-else
-  log "      받을 파일이 없습니다 (전부 캐시됨)"
-fi
 
-# ===========================================================================
-# 5. 다운로드가 도는 동안 CPU 작업 진행 — 이게 병렬화의 핵심입니다
-# ===========================================================================
-log ""
-log "[5/6] ComfyUI 최신화 + 커스텀 노드 (다운로드와 병행)"
+def ui_input_source(nodes, links, node_id, input_name):
+    """해당 노드의 특정 입력이 어느 노드에서 왔는지 반환합니다."""
+    n = nodes.get(node_id)
+    if not n:
+        return None
+    for inp in n.get("inputs", []) or []:
+        if inp.get("name") == input_name:
+            lid = inp.get("link")
+            if lid is None:
+                return None
+            link = links.get(lid)
+            return link["from"] if link else None
+    return None
 
-if [[ $UPDATE_COMFY -eq 1 && -d "$COMFY/.git" ]]; then
-  if ( cd "$COMFY" && git pull --ff-only ) >>"$LOG" 2>&1; then
-    log "      ComfyUI git pull 완료"
-  else
-    warn "ComfyUI git pull 실패 (계속 진행)"
-    warn "  추적 브랜치가 없는 detached HEAD 일 수 있습니다. 템플릿이 버전을"
-    warn "  고정한 것이므로 정상이며, --update-comfy 를 빼고 쓰시면 됩니다."
-  fi
-else
-  log "      ComfyUI 업데이트 건너뜀 (템플릿 고정 버전 사용)"
-fi
 
-install_node() {
-  local name="$1" repo="$2" commit="$3"
-  local dir="$COMFY/custom_nodes/$name"
-  if [[ -d "$dir/.git" ]]; then
-    ( cd "$dir" && git fetch -q --all && \
-      { [[ -n "$commit" ]] && git checkout -q "$commit" || git pull -q --ff-only; } ) >>"$LOG" 2>&1
-    log "      = $name (기존)"
-  else
-    git clone -q "$repo" "$dir" >>"$LOG" 2>&1 || { warn "$name clone 실패"; return 1; }
-    [[ -n "$commit" ]] && ( cd "$dir" && git checkout -q "$commit" ) >>"$LOG" 2>&1
-    log "      + $name (신규)"
-  fi
-  if [[ -f "$dir/requirements.txt" ]]; then
-    if "$PY" -m pip install -q --no-input $PIP_EXTRA -r "$dir/requirements.txt" >>"$LOG" 2>&1; then
-      log "        deps ok"
-    else
-      warn "$name requirements 설치 실패 — 이 노드는 기동 시 import 에러가 날 수 있습니다"
-      warn "  로그: grep -A5 'ERROR' $LOG"
-    fi
-  fi
-}
+def ui_widget(node, idx):
+    wv = node.get("widgets_values")
+    if isinstance(wv, list) and len(wv) > idx:
+        v = wv[idx]
+        return v if isinstance(v, str) else None
+    if isinstance(wv, dict):
+        for v in wv.values():
+            if isinstance(v, str) and v.endswith(".safetensors"):
+                return v
+    return None
 
-if [[ $SKIP_NODES -eq 0 ]]; then
-  mkdir -p "$COMFY/custom_nodes"
-  nodes=("${NODES_COMMON[@]}")
-  [[ "$TRACK" == "realistic" || "$TRACK" == "both" ]] && nodes+=("${NODES_REALISTIC[@]}")
-  [[ "$TRACK" == "anime"     || "$TRACK" == "both" ]] && nodes+=("${NODES_ANIME[@]:-}")
-  for spec in "${nodes[@]}"; do
-    [[ -z "$spec" ]] && continue
-    IFS='|' read -r n r c <<< "$spec"
-    install_node "$n" "$r" "$c"
-  done
-else
-  log "      커스텀 노드 설치 건너뜀"
-fi
 
-# 워크플로우 JSON 배치
-WF_SRC="$REPO_DIR/workflows"
-WF_DST="$COMFY/user/default/workflows"
-if [[ -d "$WF_SRC" ]]; then
-  mkdir -p "$WF_DST"
-  cp -f "$WF_SRC"/*.json "$WF_DST"/ 2>/dev/null \
-    && log "      워크플로우 JSON 배치 완료 -> $WF_DST" \
-    || warn "워크플로우 JSON 이 없습니다 ($WF_SRC)"
-fi
+def trace_model_chain_ui(nodes, links, sampler_id):
+    """
+    샘플러의 model 입력에서 UNETLoader 까지 거슬러 올라가며
+    경유한 LoRA 목록과 최종 UNET 파일명을 수집합니다.
 
-# ===========================================================================
-# 6. 다운로드 완료 대기 + 검증
-# ===========================================================================
-log ""
-log "[6/6] 다운로드 완료 대기"
-rc=0
-if [[ -n "$DISPATCH_PID" ]]; then
-  wait "$DISPATCH_PID" || rc=1
-fi
+    공식 템플릿은 Lightning LoRA 사용 여부를 ComfySwitchNode 로 토글합니다.
+    이 노드의 입력은 'model' 이 아니라 on_true / on_false 라, 이름만 보고
+    따라가면 여기서 추적이 끊깁니다. 분기 양쪽을 모두 훑어야 합니다.
+    """
+    loras = []
+    unet = None
+    stack = [ui_input_source(nodes, links, sampler_id, "model")]
+    seen = set()
+    while stack:
+        cur = stack.pop()
+        if cur is None or cur in seen:
+            continue
+        seen.add(cur)
+        n = nodes.get(cur)
+        if not n:
+            continue
+        t = n.get("type")
+        if t in ("LoraLoaderModelOnly", "LoraLoader"):
+            name = ui_widget(n, 0)
+            if name and name not in loras:
+                loras.append(name)
+            stack.append(ui_input_source(nodes, links, cur, "model"))
+        elif t == "UNETLoader":
+            unet = unet or ui_widget(n, 0)
+        else:
+            # model 입력이 있으면 따라가고, 없으면 모든 입력을 훑습니다
+            # (스위치/리라우트류는 입력 이름이 제각각입니다)
+            nxt = ui_input_source(nodes, links, cur, "model")
+            if nxt is not None:
+                stack.append(nxt)
+            else:
+                for inp in n.get("inputs", []) or []:
+                    lid = inp.get("link")
+                    if lid is not None and lid in links:
+                        if inp.get("type") in (None, "MODEL", "*"):
+                            stack.append(links[lid]["from"])
+    return unet, loras
 
-# 실측 처리량 기록. 다음 세션의 GPU/리전 선택과 --jobs 조정 근거가 됩니다.
-ELAPSED=$(( $(date +%s) - START_EPOCH ))
-if [[ $need_bytes -gt 0 && $ELAPSED -gt 0 ]]; then
-  log "      소요 $((ELAPSED/60))분 $((ELAPSED%60))초 / 평균 $(awk -v b="$need_bytes" -v s="$ELAPSED" 'BEGIN{printf "%.1f", b/s/1048576}') MB/s"
-fi
 
-if [[ -s "$FAIL_FLAG" ]]; then
-  log ""
-  log "실패한 항목:"
-  sed 's/^/  - /' "$FAIL_FLAG" | tee -a "$LOG"
-  log ""
-  log "이 스크립트는 멱등합니다. 그대로 다시 실행하면 받은 것은 건너뛰고"
-  log "실패분만 이어받습니다."
-  rm -f "$FAIL_FLAG"
-  exit 1
-fi
-rm -f "$FAIL_FLAG"
+def collect_ui(data, rep):
+    """
+    UI 포맷 수집.
 
-# 버전 기록 — "항상 최신" 정책의 대가를 상환하는 부분입니다.
-# 카나리 결과가 달라졌을 때 무엇이 바뀌었는지 여기서 답이 나옵니다.
-{
-  echo ""
-  echo "--- 버전 스냅샷 ($(date '+%F %T')) ---"
-  echo "ComfyUI: $( (cd "$COMFY" && git rev-parse --short HEAD) 2>/dev/null || echo 'n/a' )"
-  for d in "$COMFY"/custom_nodes/*/; do
-    [[ -d "$d/.git" ]] || continue
-    printf '%-32s %s\n' "$(basename "$d")" "$( (cd "$d" && git rev-parse --short HEAD) 2>/dev/null )"
-  done
-} | tee -a "$LOG"
+    최신 ComfyUI 공식 템플릿은 실제 노드를 definitions.subgraphs 안에 넣습니다
+    (최상위에는 LoadImage / SaveVideo / 서브그래프 인스턴스만 남습니다).
+    이걸 안 보면 로더도 샘플러도 0개로 잡혀 "통과"로 잘못 판정됩니다.
+    최상위 그래프와 각 서브그래프를 모두 같은 방식으로 훑습니다.
+    """
+    graphs = [("main", data)]
+    for sg in (data.get("definitions") or {}).get("subgraphs", []) or []:
+        graphs.append((sg.get("name") or "subgraph", sg))
+    if len(graphs) > 1:
+        names = ", ".join(n for n, _ in graphs[1:])
+        rep.info(f"서브그래프 {len(graphs)-1}개 포함: {names}")
 
-log ""
-log "=========================================================="
-log " 완료. track=$TRACK"
-[[ $todo_rows -gt 0 ]] && log " 주의: URL 미확정 $todo_rows 개는 받지 않았습니다."
-log ""
-log " 다음: ComfyUI 재시작 후 8188 포트 접속"
-log "   1) 워크플로우 로드 -> 빨간 노드 0개 확인"
-log "   2) 각 로더 드롭다운에 모델이 보이는지 확인"
-log "   3) 애니: 480p / 81프레임 / 4스텝 / LoRA strength 1.0"
-log "      실사: 3~5초 입력, 포즈 프리뷰부터 눈으로 확인"
-log "=========================================================="
-exit $rc
+    referenced, chains, dims = [], [], []
+
+    for gname, g in graphs:
+        nodes, links = parse_ui(g)
+        if not nodes:
+            continue
+
+        for nid, n in nodes.items():
+            t = n.get("type")
+            if t in LOADER_WIDGET_INDEX:
+                name = ui_widget(n, LOADER_WIDGET_INDEX[t])
+                if name:
+                    referenced.append((name, t))
+
+        for nid, n in nodes.items():
+            if n.get("type") in SAMPLER_TYPES:
+                unet, loras = trace_model_chain_ui(nodes, links, nid)
+                if unet or loras:
+                    label = nid if gname == "main" else f"{nid} ({gname})"
+                    chains.append({"sampler": label, "unet": unet, "loras": loras})
+
+        for nid, n in nodes.items():
+            t = n.get("type") or ""
+            if t in ("WanImageToVideo", "WanAnimateToVideo", "WanFirstLastFrameToVideo",
+                     "EmptyHunyuanLatentVideo", "EmptyLatentVideo"):
+                wv = n.get("widgets_values")
+                if isinstance(wv, list):
+                    nums = [v for v in wv if isinstance(v, (int, float))]
+                    dims.append((t, nums))
+
+    return referenced, chains, dims
+
+
+# ---------------------------------------------------------------------------
+# API 포맷 파싱
+# ---------------------------------------------------------------------------
+def api_input_source(data, node_id, key):
+    node = data.get(str(node_id)) or data.get(node_id)
+    if not node:
+        return None
+    v = node.get("inputs", {}).get(key)
+    if isinstance(v, list) and v:
+        return str(v[0])
+    return None
+
+
+def trace_model_chain_api(data, sampler_id):
+    loras, unet = [], None
+    cur = api_input_source(data, sampler_id, "model")
+    seen = set()
+    while cur is not None and cur not in seen:
+        seen.add(cur)
+        node = data.get(cur)
+        if not node:
+            break
+        ct = node.get("class_type")
+        if ct in ("LoraLoaderModelOnly", "LoraLoader"):
+            nm = node.get("inputs", {}).get("lora_name")
+            if isinstance(nm, str):
+                loras.append(nm)
+            cur = api_input_source(data, cur, "model")
+        elif ct == "UNETLoader":
+            nm = node.get("inputs", {}).get("unet_name")
+            unet = nm if isinstance(nm, str) else None
+            break
+        else:
+            cur = api_input_source(data, cur, "model")
+    return unet, loras
+
+
+def collect_api(data, rep):
+    referenced = []
+    for nid, node in data.items():
+        ct = node.get("class_type")
+        for k, v in (node.get("inputs") or {}).items():
+            if k in API_FILE_KEYS and isinstance(v, str):
+                referenced.append((v, ct))
+
+    chains = []
+    for nid, node in data.items():
+        if node.get("class_type") in SAMPLER_TYPES:
+            unet, loras = trace_model_chain_api(data, nid)
+            if unet or loras:
+                chains.append({"sampler": nid, "unet": unet, "loras": loras})
+
+    dims = []
+    for nid, node in data.items():
+        ct = node.get("class_type") or ""
+        if ct.startswith("Wan") or ct.startswith("Empty"):
+            ins = node.get("inputs") or {}
+            nums = [(k, v) for k, v in ins.items()
+                    if k in ("width", "height", "length", "batch_size") and isinstance(v, int)]
+            if nums:
+                dims.append((ct, nums))
+    return referenced, chains, dims
+
+
+# ---------------------------------------------------------------------------
+def stage_of(name):
+    """
+    파일명에서 high/low noise 단계를 판정합니다.
+    배포자마다 표기가 제각각입니다: high_noise / high-noise / highnoise / HighNoise.
+    하나라도 놓치면 정작 중요한 불일치 검사가 조용히 통과해버립니다.
+    """
+    low = re.sub(r"[^a-z]", "", name.lower())   # 구분자 제거 후 비교
+    if "highnoise" in low:
+        return "high"
+    if "lownoise" in low:
+        return "low"
+    return None
+
+
+def check_chains(chains, rep):
+    """
+    핵심 검사. high noise UNET 쪽 체인에 low noise LoRA 가 물려 있으면
+    (또는 그 반대) 고스팅/이중노출이 납니다.
+    """
+    if not chains:
+        rep.warn("샘플러의 모델 체인을 추적하지 못했습니다 "
+                 "(커스텀 노드 기반 워크플로우면 정상일 수 있습니다)")
+        return
+
+    for ch in chains:
+        unet = ch["unet"]
+        ustage = stage_of(unet) if unet else None
+        label = f"샘플러 #{ch['sampler']}"
+        if unet:
+            label += f"  UNET={unet}"
+        rep.info(label)
+        for lora in ch["loras"]:
+            lstage = stage_of(lora)
+            mark = "    LoRA " + lora
+            if ustage and lstage and ustage != lstage:
+                rep.err(f"단계 불일치: {ustage} noise UNET 체인에 "
+                        f"{lstage} noise LoRA 가 물려 있습니다 -> {lora}\n"
+                        f"      이 상태로 생성하면 고스팅(이중 노출)이 납니다.")
+                mark += f"   <-- 불일치 ({lstage} vs UNET {ustage})"
+            elif lstage and ustage and lstage == ustage:
+                mark += "   (단계 일치)"
+            rep.info(mark)
+
+    # high/low 가 모두 존재해야 하는 MoE 구조인지 점검
+    unets = [stage_of(c["unet"]) for c in chains if c["unet"]]
+    if unets.count("high") and not unets.count("low"):
+        rep.warn("high noise UNET 만 있고 low noise 가 없습니다. "
+                 "Wan 2.2 MoE 는 두 단계를 모두 씁니다.")
+    if unets.count("low") and not unets.count("high"):
+        rep.warn("low noise UNET 만 있고 high noise 가 없습니다.")
+
+
+def check_dims(dims, rep):
+    for t, nums in dims:
+        vals = [v for v in nums] if nums and not isinstance(nums[0], tuple) else None
+        if vals is None:
+            d = dict(nums)
+            w, h, length = d.get("width"), d.get("height"), d.get("length")
+        else:
+            w = vals[0] if len(vals) > 0 else None
+            h = vals[1] if len(vals) > 1 else None
+            length = vals[2] if len(vals) > 2 else None
+        if isinstance(w, int) and w % 16:
+            rep.err(f"{t}: width={w} 가 16의 배수가 아닙니다")
+        if isinstance(h, int) and h % 16:
+            rep.err(f"{t}: height={h} 가 16의 배수가 아닙니다")
+        if isinstance(length, int) and length > 1:
+            if length % 4 != 1:
+                rep.err(f"{t}: length={length} 가 4n+1 이 아닙니다 "
+                        f"(유효 예: 33, 41, 65, 81)")
+            elif length < 65:
+                rep.warn(f"{t}: length={length}. 애니 스타일 LoRA 는 프레임이 적으면 "
+                         f"트리거되지 않을 수 있습니다 (65~81 권장)")
+        if isinstance(w, int) and isinstance(h, int):
+            rep.info(f"{t}: {w}x{h}" + (f", {length} 프레임" if length else ""))
+
+
+def check_file(path, known, track, rep):
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except json.JSONDecodeError as e:
+        rep.err(f"JSON 파싱 실패: {e}")
+        return set()
+    except OSError as e:
+        rep.err(f"파일을 열 수 없습니다: {e}")
+        return set()
+
+    fmt = detect_format(data)
+    if fmt == "unknown":
+        rep.err("ComfyUI 워크플로우 JSON 으로 보이지 않습니다 "
+                "(nodes 배열도 class_type 맵도 없음)")
+        return set()
+    rep.info(f"포맷: {'UI(저장본)' if fmt == 'ui' else 'API(export)'}")
+
+    referenced, chains, dims = (collect_ui if fmt == "ui" else collect_api)(data, rep)
+
+    used = set()
+    if known is None:
+        rep.warn("매니페스트를 찾을 수 없어 파일명 대조는 건너뜁니다")
+    else:
+        for name, ntype in referenced:
+            used.add(name)
+            if name not in known:
+                rep.err(f"매니페스트에 없는 모델: {name}  ({ntype})\n"
+                        f"      -> Pod 에서 이 로더의 드롭다운이 비어 있게 됩니다.")
+            else:
+                t, s, _ = known[name]
+                if track and t not in ("common", track):
+                    rep.warn(f"{name} 은 '{t}' 트랙 파일인데 '{track}' 워크플로우가 참조합니다")
+
+    check_chains(chains, rep)
+    check_dims(dims, rep)
+    return used
+
+
+def main():
+    ap = argparse.ArgumentParser(description="ComfyUI 워크플로우 사전 검증")
+    ap.add_argument("workflows", nargs="+", help="검사할 JSON 파일")
+    ap.add_argument("-m", "--manifest", default=None, help="매니페스트 경로")
+    ap.add_argument("-t", "--track", default=None,
+                    choices=["anime", "realistic"], help="기대 트랙")
+    args = ap.parse_args()
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    mpath = args.manifest or os.path.join(here, "manifest.tsv")
+    known = load_manifest(mpath)
+    if known is not None:
+        print(f"매니페스트: {mpath}  ({len(known)} 개 항목)\n")
+
+    total_used = set()
+    failed = 0
+
+    for wf in args.workflows:
+        rep = Report()
+        print("=" * 66)
+        print(os.path.basename(wf))
+        print("=" * 66)
+        used = check_file(wf, known, args.track, rep)
+        total_used |= used
+
+        for m in rep.infos:
+            print("  " + m)
+        if rep.warns:
+            print()
+            for m in rep.warns:
+                print("  [경고] " + m)
+        if rep.errors:
+            print()
+            for m in rep.errors:
+                print("  [오류] " + m)
+            failed += 1
+        print()
+        print("  판정:", "통과" if rep.ok() else "실패")
+        print()
+
+    # 매니페스트에는 있는데 어떤 워크플로우도 안 쓰는 파일
+    if known and total_used:
+        unused = [n for n in known if n not in total_used]
+        if unused:
+            print("=" * 66)
+            print("어느 워크플로우도 참조하지 않는 매니페스트 항목")
+            print("=" * 66)
+            for n in unused:
+                t, s, url = known[n]
+                tag = " (URL 미확정)" if url.startswith("TODO") else ""
+                print(f"  {t:<10} {n}{tag}")
+            print("\n  다른 트랙 파일이면 정상입니다. 아니라면 받을 필요가 없는 용량입니다.")
+            print()
+
+    sys.exit(1 if failed else 0)
+
+
+if __name__ == "__main__":
+    main()
