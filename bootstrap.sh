@@ -34,6 +34,20 @@
 #
 set -uo pipefail
 
+# ---------------------------------------------------------------------------
+# 이 스크립트는 Pod(리눅스) 전용입니다. 백그라운드 디스패처가 `wait -n`(bash 4.3+)에
+# 의존하고, 경로 탐지/디스크 검사도 컨테이너를 전제로 합니다.
+# macOS 기본 bash 는 3.2 라 여기서 걸립니다. 로컬 검증용 도구는
+# verify_manifest.sh 와 check_workflow.py 쪽입니다.
+# ---------------------------------------------------------------------------
+if [[ -z "${BASH_VERSINFO:-}" ]] || (( BASH_VERSINFO[0] < 4 )) \
+   || { (( BASH_VERSINFO[0] == 4 )) && (( BASH_VERSINFO[1] < 3 )); }; then
+  echo "이 스크립트는 bash 4.3 이상이 필요합니다 (현재: ${BASH_VERSION:-unknown})" >&2
+  echo "  bootstrap.sh 는 RunPod Pod 안에서 실행하는 용도입니다." >&2
+  echo "  로컬 검증은 verify_manifest.sh / check_workflow.py 를 쓰세요." >&2
+  exit 1
+fi
+
 # ===========================================================================
 # 커스텀 노드 정의
 #
@@ -278,7 +292,7 @@ download_one() {
   # tail -f 로 개별 파일 진행을 볼 수 있게 하는 것이 목적입니다.
   [[ $QUIET_DL -eq 0 ]] && prog=(-q --show-progress --progress=dot:giga)
   mkdir -p "$(dirname "$target")"
-  if wget -c "${prog[@]}" --tries=3 --timeout=60 "${auth[@]}" -O "$target" "$url" \
+  if wget -c "${prog[@]}" --tries=3 --timeout=60 ${auth[@]+"${auth[@]}"} -O "$target" "$url" \
         >"$DL_LOG_DIR/$name.log" 2>&1; then
     if [[ "$bytes" != "0" ]]; then
       local got; got="$(stat -c %s "$target" 2>/dev/null || echo 0)"

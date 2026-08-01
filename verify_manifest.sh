@@ -73,13 +73,15 @@ probe() {
     *civitai.com*)    [[ -n "${CIVITAI_TOKEN:-}" ]] && auth=(-H "Authorization: Bearer $CIVITAI_TOKEN") ;;
   esac
 
+  # macOS 기본 bash 3.2 에서는 set -u 상태의 빈 배열 확장이 에러입니다.
+  # ${arr[@]+"${arr[@]}"} 형태여야 비어 있을 때 안전하게 사라집니다.
   # 1차: HEAD
-  hdrs="$(curl -sIL --max-time "$TIMEOUT" "${auth[@]}" "$url" 2>/dev/null)"
+  hdrs="$(curl -sIL --max-time "$TIMEOUT" ${auth[@]+"${auth[@]}"} "$url" 2>/dev/null)"
   code="$(printf '%s' "$hdrs" | awk 'BEGIN{IGNORECASE=1} /^HTTP\//{c=$2} END{print c}')"
 
   if [[ "$code" != "200" ]]; then
     # 2차: range GET 폴백 (HEAD 거부 서버 대응)
-    hdrs="$(curl -sL -r 0-0 -D - -o /dev/null --max-time "$TIMEOUT" "${auth[@]}" "$url" 2>/dev/null)"
+    hdrs="$(curl -sL -r 0-0 -D - -o /dev/null --max-time "$TIMEOUT" ${auth[@]+"${auth[@]}"} "$url" 2>/dev/null)"
     code="$(printf '%s' "$hdrs" | awk 'BEGIN{IGNORECASE=1} /^HTTP\//{c=$2} END{print c}')"
     [[ "$code" == "200" || "$code" == "206" ]] || { echo ""; return 1; }
     # Content-Range: bytes 0-0/12345  -> 총 크기는 슬래시 뒤
@@ -104,7 +106,9 @@ printf '%-10s %-6s %-9s %s\n' "TRACK" "STAGE" "SIZE(GB)" "FILE"
 printf '%s\n' "----------------------------------------------------------------------"
 
 TMP="$(mktemp)"
-declare -A TRACK_TOTAL
+# 연관 배열(declare -A)은 bash 4.0+ 전용이라 macOS 기본 bash 3.2 에서 죽습니다.
+# 트랙이 셋뿐이므로 평범한 스칼라로 충분합니다.
+T_COMMON=0; T_ANIME=0; T_REALISTIC=0
 fail=0; todo=0; ok=0
 
 while IFS=$'\t' read -r track stage dest filename url bytes || [[ -n "${track:-}" ]]; do
@@ -125,7 +129,12 @@ while IFS=$'\t' read -r track stage dest filename url bytes || [[ -n "${track:-}
   else
     printf '%-10s %-6s %-9s %s\n' "$track" "$stage" "$(gb "$size")" "$filename"
     ok=$((ok+1))
-    TRACK_TOTAL[$track]=$(( ${TRACK_TOTAL[$track]:-0} + size ))
+    case "$track" in
+      common)    T_COMMON=$((T_COMMON + size)) ;;
+      anime)     T_ANIME=$((T_ANIME + size)) ;;
+      realistic) T_REALISTIC=$((T_REALISTIC + size)) ;;
+      *) printf '  ! 알 수 없는 track: %s (집계에서 제외)\n' "$track" >&2 ;;
+    esac
     if [[ -n "$bytes" && "$bytes" != "0" && "$bytes" != "$size" ]]; then
       printf '%-10s %-6s %-9s   ^ 경고: 기록된 크기(%s)와 다름\n' "" "" "" "$bytes"
     fi
@@ -134,9 +143,9 @@ while IFS=$'\t' read -r track stage dest filename url bytes || [[ -n "${track:-}
 done < "$NORM"
 
 # ---------------------------------------------------------------------------
-common=${TRACK_TOTAL[common]:-0}
-anime=${TRACK_TOTAL[anime]:-0}
-realistic=${TRACK_TOTAL[realistic]:-0}
+common=$T_COMMON
+anime=$T_ANIME
+realistic=$T_REALISTIC
 
 printf '\n%s\n' "== 트랙별 다운로드 총량 (확인된 것만) =========================="
 printf '  common          %s GB\n' "$(gb $common)"

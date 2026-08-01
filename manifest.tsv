@@ -1,63 +1,63 @@
-# comfy-bootstrap 모델 매니페스트					
-#					
-# 컬럼(탭 구분): track  stage  dest  filename  url  bytes					
-#					
-#   track     : common | realistic | anime      (부트스트랩 인자로 필터링)					
-#   stage     : high | low | -                  (Wan 2.2 MoE 샘플러 배선 대상)					
-#   dest      : ComfyUI/models/ 아래 상대 경로					
-#   filename  : 저장될 파일명					
-#   url       : 직접 다운로드 URL (TODO = 미확정)					
-#   bytes     : 실측 크기. 0 = 미확정. verify_manifest.sh --fix 로 자동 기입					
-#					
-# 규칙:					
-#   - 탭으로만 구분. 스페이스 정렬 금지 (파싱 깨짐)					
-#   - 반드시 LF 개행. .gitattributes 로 강제됨 (CRLF 는 멱등성을 깨뜨림)					
-#   - '#' 로 시작하는 줄과 빈 줄은 무시					
-#					
-# ---------------------------------------------------------------------------					
-# COMMON — 두 트랙 모두 필요. 실측 7.69GB					
-# ---------------------------------------------------------------------------					
+# comfy-bootstrap 모델 매니페스트
+#
+# 컬럼(탭 구분): track  stage  dest  filename  url  bytes
+#
+#   track     : common | realistic | anime      (부트스트랩 인자로 필터링)
+#   stage     : high | low | -                  (Wan 2.2 MoE 샘플러 배선 대상)
+#   dest      : ComfyUI/models/ 아래 상대 경로
+#   filename  : 저장될 파일명
+#   url       : 직접 다운로드 URL (TODO = 미확정)
+#   bytes     : 실측 크기. 0 = 미확정. verify_manifest.sh --fix 로 자동 기입
+#
+# 규칙:
+#   - 탭으로만 구분. 스페이스 정렬 금지 (파싱 깨짐)
+#   - 반드시 LF 개행. .gitattributes 로 강제됨 (CRLF 는 멱등성을 깨뜨림)
+#   - '#' 로 시작하는 줄과 빈 줄은 무시
+#
+# ---------------------------------------------------------------------------
+# COMMON — 두 트랙 모두 필요. 실측 7.69GB
+# ---------------------------------------------------------------------------
 common	-	text_encoders	umt5_xxl_fp8_e4m3fn_scaled.safetensors	https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors	6735906897
 common	-	vae	wan_2.1_vae.safetensors	https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/vae/wan_2.1_vae.safetensors	253815318
 common	-	clip_vision	clip_vision_h.safetensors	https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/clip_vision/clip_vision_h.safetensors	1264219396
-#					
-# ---------------------------------------------------------------------------					
-# ANIME — 이미지+프롬프트 -> 영상					
-#					
-# Lightning LoRA 는 Wan 2.2 네이티브를 씁니다. 실사 트랙의					
-# lightx2v_I2V_14B_480p... 는 Wan 2.1 기반이라 2.2 모델에 물리면 안 됩니다.					
-# ---------------------------------------------------------------------------					
+#
+# ---------------------------------------------------------------------------
+# ANIME — 이미지+프롬프트 -> 영상
+#
+# Lightning LoRA 는 Wan 2.2 네이티브를 씁니다. 실사 트랙의
+# lightx2v_I2V_14B_480p... 는 Wan 2.1 기반이라 2.2 모델에 물리면 안 됩니다.
+# ---------------------------------------------------------------------------
 anime	high	diffusion_models	wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors	https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/diffusion_models/wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors	14294742832
 anime	low	diffusion_models	wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors	https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/diffusion_models/wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors	14294742832
 anime	low	loras	wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors	https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors	1226977424
-#					
-# high_noise 짝이 같은 폴더에 있는지 확인 필요. 주석을 해제하고 검증을					
-# 돌려보세요. FAIL 이면 존재하지 않는 것이니 다시 주석 처리하면 됩니다.					
-anime	high	loras	wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors	https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors	0
-#					
-# 애니 스타일 LoRA (Civitai). Civitai 직접 링크는 세션마다 깨지기 쉬우므로					
-# 수동으로 1회 받아 본인이 통제하는 저장소에 올리고 그 URL 을 넣으세요.					
-anime	low	loras	anime_style_wan22_i2v_lownoise_v2.safetensors	TODO_CIVITAI	0
-#					
-# ---------------------------------------------------------------------------					
-# REALISTIC — 영상+이미지 -> 인물 교체					
-#					
-# 주의: Animate 파일은 저장소 루트에서 Wan22Animate/ 하위로 이동했습니다.					
-# v2(17.3GB)도 존재하나 공식 워크플로우가 v1 파일명을 참조하므로 v1 유지.					
-# ---------------------------------------------------------------------------					
+#
+# high_noise 짝이 같은 폴더에 있는지 확인 필요. 주석을 해제하고 검증을
+# 돌려보세요. FAIL 이면 존재하지 않는 것이니 다시 주석 처리하면 됩니다.
+anime	high	loras	wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors	https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors	1226977424
+#
+# 애니 스타일 LoRA (Civitai). Civitai 직접 링크는 세션마다 깨지기 쉬우므로
+# 수동으로 1회 받아 본인이 통제하는 저장소에 올리고 그 URL 을 넣으세요.
+anime	low	loras	anime_style_wan22_i2v_lownoise_v2.safetensors	https://civitai.com/api/download/models/2516839	0
+#
+# ---------------------------------------------------------------------------
+# REALISTIC — 영상+이미지 -> 인물 교체
+#
+# 주의: Animate 파일은 저장소 루트에서 Wan22Animate/ 하위로 이동했습니다.
+# v2(17.3GB)도 존재하나 공식 워크플로우가 v1 파일명을 참조하므로 v1 유지.
+# ---------------------------------------------------------------------------
 realistic	-	diffusion_models	Wan2_2-Animate-14B_fp8_e4m3fn_scaled_KJ.safetensors	https://huggingface.co/Kijai/WanVideo_comfy_fp8_scaled/resolve/main/Wan22Animate/Wan2_2-Animate-14B_fp8_e4m3fn_scaled_KJ.safetensors	18401760586
 realistic	-	loras	lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors	https://huggingface.co/Kijai/WanVideo_comfy/resolve/main/Lightx2v/lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors	738005744
-#					
-# 선택: 조명/사실감 보강 LoRA. 원본 영상 조명 매칭이 아쉬울 때 사용.					
+#
+# 선택: 조명/사실감 보강 LoRA. 원본 영상 조명 매칭이 아쉬울 때 사용.
 realistic	-	loras	WanAnimate_relight_lora_fp16.safetensors	https://huggingface.co/Kijai/WanVideo_comfy/resolve/main/LoRAs/Wan22_relight/WanAnimate_relight_lora_fp16.safetensors	1436672440
-#					
-# ---------------------------------------------------------------------------					
-# 매니페스트에 넣지 않는 것 (노드가 첫 실행 시 자동 다운로드)					
-#   - SAM2 체크포인트   : ComfyUI-segment-anything-2 가 자동 취득					
-#   - DWPose 체크포인트 : comfyui_controlnet_aux 가 ckpts/ 로 자동 취득					
-#   -> 실사 트랙 "첫 생성"이 오래 걸리는 원인. 놀라지 마세요.					
-#					
-# 확인 필요 (2단계에서 실제 컨테이너 보고 확정)					
-#   - clip_vision vs clip_visions : ComfyUI 표준은 clip_vision 이지만 일부					
-#     문서/워크플로우는 clip_visions 로 표기합니다. 실제 존재하는 디렉토리에					
-#     맞춰야 로더가 파일을 인식합니다. 부트스트랩이 자동 감지하도록 만들 예정.					
+#
+# ---------------------------------------------------------------------------
+# 매니페스트에 넣지 않는 것 (노드가 첫 실행 시 자동 다운로드)
+#   - SAM2 체크포인트   : ComfyUI-segment-anything-2 가 자동 취득
+#   - DWPose 체크포인트 : comfyui_controlnet_aux 가 ckpts/ 로 자동 취득
+#   -> 실사 트랙 "첫 생성"이 오래 걸리는 원인. 놀라지 마세요.
+#
+# 확인 필요 (2단계에서 실제 컨테이너 보고 확정)
+#   - clip_vision vs clip_visions : ComfyUI 표준은 clip_vision 이지만 일부
+#     문서/워크플로우는 clip_visions 로 표기합니다. 실제 존재하는 디렉토리에
+#     맞춰야 로더가 파일을 인식합니다. 부트스트랩이 자동 감지하도록 만들 예정.
