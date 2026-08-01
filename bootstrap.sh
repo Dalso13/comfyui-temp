@@ -14,11 +14,19 @@
 #   bash bootstrap.sh both --strict
 #
 # 옵션:
-#   --jobs N       동시 다운로드 수 (기본 3. 그 이상은 경합만 늘어남)
+#   --jobs N       동시 다운로드 수 (기본 3)
 #   --strict       TODO/누락 항목이 있으면 진행하지 않음
 #   --skip-nodes   커스텀 노드 설치 건너뛰기 (모델만 다시 받을 때)
-#   --skip-update  ComfyUI git pull 건너뛰기
+#   --update-comfy ComfyUI git pull 시도 (기본 꺼짐 — 아래 설명 참고)
+#   --quiet-dl     다운로드 진행률 표시 끄기
 #   --dry-run      실제 다운로드/설치 없이 계획만 출력
+#
+# ComfyUI 업데이트가 기본 꺼짐인 이유:
+#   RunPod 공식 ComfyUI 템플릿은 검증된 커밋에 detached HEAD 로 고정돼 있습니다.
+#   추적 브랜치가 없어 git pull 이 실패하고, 억지로 최신으로 끌어올리면
+#   템플릿이 검증한 조합(CUDA/torch/노드)을 깨뜨릴 위험만 생깁니다.
+#   템플릿이 이미 버전을 고정해 주므로 재현성 측면에서도 이쪽이 낫습니다.
+#   직접 빌드한 이미지처럼 추적 브랜치가 있는 환경에서만 --update-comfy 를 쓰세요.
 #
 # 환경변수:
 #   COMFY_ROOT     ComfyUI 경로 자동탐지 실패 시 직접 지정
@@ -50,18 +58,21 @@ TRACK=""
 JOBS=3
 STRICT=0
 SKIP_NODES=0
-SKIP_UPDATE=0
+UPDATE_COMFY=0
+QUIET_DL=0
 DRY=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     anime|realistic|both) TRACK="$1"; shift ;;
-    --jobs)        JOBS="${2:-3}"; shift 2 ;;
-    --strict)      STRICT=1; shift ;;
-    --skip-nodes)  SKIP_NODES=1; shift ;;
-    --skip-update) SKIP_UPDATE=1; shift ;;
-    --dry-run)     DRY=1; shift ;;
-    -h|--help)     sed -n '2,30p' "$0"; exit 0 ;;
+    --jobs)         JOBS="${2:-3}"; shift 2 ;;
+    --strict)       STRICT=1; shift ;;
+    --skip-nodes)   SKIP_NODES=1; shift ;;
+    --update-comfy) UPDATE_COMFY=1; shift ;;
+    --skip-update)  shift ;;   # 하위호환: 이제 기본이 건너뛰기라 무시
+    --quiet-dl)     QUIET_DL=1; shift ;;
+    --dry-run)      DRY=1; shift ;;
+    -h|--help)      sed -n '2,40p' "$0"; exit 0 ;;
     *) echo "알 수 없는 인자: $1" >&2; exit 2 ;;
   esac
 done
@@ -76,6 +87,7 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MANIFEST="$REPO_DIR/manifest.tsv"
 LOG_DIR="$REPO_DIR/logs"
 STAMP="$(date +%Y%m%d_%H%M%S)"
+START_EPOCH="$(date +%s)"
 mkdir -p "$LOG_DIR"
 LOG="$LOG_DIR/bootstrap_${TRACK}_${STAMP}.log"
 
@@ -260,10 +272,13 @@ FAIL_FLAG="$(mktemp)"
 
 download_one() {
   local bytes="$1" target="$2" url="$3" name="$4"
-  local auth=()
+  local auth=() prog=(-q)
   [[ -n "${HF_TOKEN:-}" && "$url" == *huggingface.co* ]] && auth=(--header="Authorization: Bearer $HF_TOKEN")
+  # 진행률: 로그 파일로 가므로 병렬 출력이 섞이지 않습니다.
+  # tail -f 로 개별 파일 진행을 볼 수 있게 하는 것이 목적입니다.
+  [[ $QUIET_DL -eq 0 ]] && prog=(-q --show-progress --progress=dot:giga)
   mkdir -p "$(dirname "$target")"
-  if wget -c -q --tries=3 --timeout=60 "${auth[@]}" -O "$target" "$url" \
+  if wget -c "${prog[@]}" --tries=3 --timeout=60 "${auth[@]}" -O "$target" "$url" \
         >"$DL_LOG_DIR/$name.log" 2>&1; then
     if [[ "$bytes" != "0" ]]; then
       local got; got="$(stat -c %s "$target" 2>/dev/null || echo 0)"
@@ -278,15 +293,34 @@ download_one() {
   return 1
 }
 
-pids=()
+# ---------------------------------------------------------------------------
+# 디스패처를 백그라운드로 통째로 분리합니다.
+#
+# 이전 버전은 이 자리에서 동시 실행 수를 기다렸습니다. 그래서 파일이 JOBS 개를
+# 넘으면 4번째부터 이 루프에 갇혀, 아래 [5/6] 의 CPU 작업이 다운로드가 끝날
+# 때까지 시작조차 못 했습니다. 병렬화의 목적이 정확히 무산되는 구조였습니다.
+# 이제 대기는 디스패처 안에서만 일어나고 메인 셸은 즉시 다음 단계로 갑니다.
+# ---------------------------------------------------------------------------
+DISPATCH_PID=""
 if [[ $dl_count -gt 0 ]]; then
   while IFS=$'\t' read -r bytes target url name; do
-    # 동시 실행 수 제한
-    while (( $(jobs -rp | wc -l) >= JOBS )); do sleep 1; done
-    download_one "$bytes" "$target" "$url" "$name" &
-    pids+=($!)
     log "      -> $name ($(awk -v b="$bytes" 'BEGIN{printf "%.2f", b/1073741824}') GiB)"
   done < "$PLAN"
+
+  (
+    running=0
+    while IFS=$'\t' read -r bytes target url name; do
+      while (( running >= JOBS )); do
+        wait -n 2>/dev/null || true
+        running=$((running-1))
+      done
+      download_one "$bytes" "$target" "$url" "$name" &
+      running=$((running+1))
+    done < "$PLAN"
+    wait
+  ) &
+  DISPATCH_PID=$!
+  log "      (백그라운드 진행. 개별 진행률: tail -f $DL_LOG_DIR/<파일명>.log)"
 else
   log "      받을 파일이 없습니다 (전부 캐시됨)"
 fi
@@ -297,12 +331,16 @@ fi
 log ""
 log "[5/6] ComfyUI 최신화 + 커스텀 노드 (다운로드와 병행)"
 
-if [[ $SKIP_UPDATE -eq 0 && -d "$COMFY/.git" ]]; then
-  ( cd "$COMFY" && git pull --ff-only ) >>"$LOG" 2>&1 \
-    && log "      ComfyUI git pull 완료" \
-    || warn "ComfyUI git pull 실패 (계속 진행)"
+if [[ $UPDATE_COMFY -eq 1 && -d "$COMFY/.git" ]]; then
+  if ( cd "$COMFY" && git pull --ff-only ) >>"$LOG" 2>&1; then
+    log "      ComfyUI git pull 완료"
+  else
+    warn "ComfyUI git pull 실패 (계속 진행)"
+    warn "  추적 브랜치가 없는 detached HEAD 일 수 있습니다. 템플릿이 버전을"
+    warn "  고정한 것이므로 정상이며, --update-comfy 를 빼고 쓰시면 됩니다."
+  fi
 else
-  log "      ComfyUI 업데이트 건너뜀"
+  log "      ComfyUI 업데이트 건너뜀 (템플릿 고정 버전 사용)"
 fi
 
 install_node() {
@@ -357,10 +395,15 @@ fi
 log ""
 log "[6/6] 다운로드 완료 대기"
 rc=0
-for p in "${pids[@]:-}"; do
-  [[ -z "$p" ]] && continue
-  wait "$p" || rc=1
-done
+if [[ -n "$DISPATCH_PID" ]]; then
+  wait "$DISPATCH_PID" || rc=1
+fi
+
+# 실측 처리량 기록. 다음 세션의 GPU/리전 선택과 --jobs 조정 근거가 됩니다.
+ELAPSED=$(( $(date +%s) - START_EPOCH ))
+if [[ $need_bytes -gt 0 && $ELAPSED -gt 0 ]]; then
+  log "      소요 $((ELAPSED/60))분 $((ELAPSED%60))초 / 평균 $(awk -v b="$need_bytes" -v s="$ELAPSED" 'BEGIN{printf "%.1f", b/s/1048576}') MB/s"
+fi
 
 if [[ -s "$FAIL_FLAG" ]]; then
   log ""
