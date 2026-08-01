@@ -33,11 +33,11 @@ anime	low	loras	wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors	https:/
 #					
 # high_noise 짝이 같은 폴더에 있는지 확인 필요. 주석을 해제하고 검증을					
 # 돌려보세요. FAIL 이면 존재하지 않는 것이니 다시 주석 처리하면 됩니다.					
-anime	high	loras	wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors	https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors	0
+anime	high	loras	wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors	https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors	1226977424
 #					
 # 애니 스타일 LoRA (Civitai). Civitai 직접 링크는 세션마다 깨지기 쉬우므로					
 # 수동으로 1회 받아 본인이 통제하는 저장소에 올리고 그 URL 을 넣으세요.					
-anime	low	loras	anime_style_wan22_i2v_lownoise_v2.safetensors	TODO_CIVITAI	0
+anime	low	loras	anime_style_wan22_i2v_lownoise_v2.safetensors	https://civitai.com/api/download/models/2516839	0
 #					
 # ---------------------------------------------------------------------------					
 # REALISTIC — 영상+이미지 -> 인물 교체					
