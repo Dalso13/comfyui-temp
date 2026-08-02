@@ -30,6 +30,7 @@
 #
 # 환경변수:
 #   COMFY_ROOT       ComfyUI 경로 자동탐지 실패 시 직접 지정
+#   COMFY_PYTHON     파이썬 자동탐지 실패 시 직접 지정 (venv 의 bin/python)
 #   HF_TOKEN         게이트된 HF 저장소용 (선택)
 #   CIVITAI_TOKEN     civitai.com 다운로드 URL 인증용
 #                     Civitai 계정 -> Settings -> API Keys 에서 발급
@@ -243,15 +244,42 @@ command -v git  >/dev/null || die "git 이 없습니다."
 # 기동 시 조용히 import 에러가 납니다. 가장 잡기 어려운 종류의 실패입니다.
 detect_python() {
   local c
+  # 사용자가 직접 지정한 경우 최우선
+  [[ -n "${COMFY_PYTHON:-}" && -x "${COMFY_PYTHON}" ]] && { echo "$COMFY_PYTHON"; return; }
+  # 고정 이름 우선
   for c in "$COMFY/venv/bin/python" "$COMFY/.venv/bin/python" \
            /workspace/venv/bin/python /workspace/.venv/bin/python; do
     [[ -x "$c" ]] && { echo "$c"; return; }
   done
+  # 접미사가 붙은 venv (RunPod 템플릿의 .venv-cu128 등)
+  for c in "$COMFY"/.venv*/bin/python "$COMFY"/venv*/bin/python \
+           /workspace/.venv*/bin/python /workspace/venv*/bin/python; do
+    [[ -x "$c" ]] && { echo "$c"; return; }
+  done
+  # 기동 스크립트에 적힌 venv 를 마지막 단서로 사용
+  c="$(grep -rhoE '(source|\.) +[^ ]*/(\.?venv[^ /]*)/bin/activate' \
+        "$COMFY"/*.sh /workspace/*.sh 2>/dev/null | head -1 \
+        | grep -oE '[^ ]*/bin/activate' | sed 's|/activate$|/python|')"
+  [[ -n "$c" && -x "$c" ]] && { echo "$c"; return; }
   command -v python3 || command -v python
 }
 PY="$(detect_python)"
 [[ -n "$PY" ]] || die "파이썬을 찾지 못했습니다."
 log "      python: $PY"
+
+# venv 가 있는데 시스템 파이썬을 고르면 노드 의존성이 ComfyUI 가 보지 못하는
+# 곳에 설치되고, 최악의 경우 시스템 torch 를 건드려 ComfyUI 가 기동조차
+# 못 하게 됩니다. 조용히 넘어가면 원인 추적이 매우 어려우므로 크게 알립니다.
+case "$PY" in
+  *venv*) ;;
+  *)
+    if compgen -G "$COMFY/.venv*" >/dev/null 2>&1 || compgen -G "$COMFY/venv*" >/dev/null 2>&1; then
+      warn "venv 가 존재하는데 시스템 파이썬을 선택했습니다. 노드 의존성이 엉뚱한"
+      warn "  곳에 설치됩니다. COMFY_PYTHON=/경로/bin/python 으로 지정하고 다시 실행하세요."
+      warn "  후보: $(ls -d "$COMFY"/.venv* "$COMFY"/venv* 2>/dev/null | tr '\n' ' ')"
+    fi
+    ;;
+esac
 
 # PEP 668(externally-managed-environment) 대응. venv 면 불필요하지만
 # 시스템 파이썬이면 --break-system-packages 가 필요합니다.
