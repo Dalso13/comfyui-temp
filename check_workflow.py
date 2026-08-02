@@ -223,12 +223,44 @@ def collect_ui(data, rep):
                 if name:
                     referenced.append((name, t))
 
+        seen_sig = set(); pending = []; covered = set()
         for nid, n in nodes.items():
             if n.get("type") in SAMPLER_TYPES:
                 unet, loras = trace_model_chain_ui(nodes, links, nid)
                 if unet or loras:
                     label = nid if gname == "main" else f"{nid} ({gname})"
                     chains.append({"sampler": label, "unet": unet, "loras": loras})
+                    seen_sig.add((unet, tuple(loras)))
+                    covered.add(unet)
+
+        # 실사 템플릿처럼 로더는 최상위, 샘플러는 서브그래프 안에 있는 구조에서는
+        # 위 추적이 경계를 못 넘습니다. 그럴 때는 모델 체인의 마지막 노드
+        # (ModelSamplingSD3 등)를 끝점으로 삼아 거꾸로 훑습니다.
+        for nid, n in nodes.items():
+            if n.get("type") not in MODEL_PASSTHROUGH:
+                continue
+            unet, loras = trace_model_chain_ui(nodes, links, nid)
+            if not unet and not loras:
+                continue
+            if (unet, tuple(loras)) in seen_sig or unet in covered:
+                continue
+            label = f"{nid} → {n.get('type')}"
+            if gname != "main":
+                label += f" ({gname})"
+            pending.append({"sampler": label, "unet": unet,
+                            "loras": loras, "n": len(loras)})
+            seen_sig.add((unet, tuple(loras)))
+
+        # 같은 UNET 에 대해 부분 체인이 여러 개 잡힙니다 (중간 노드도 끝점이 되므로).
+        # LoRA 를 가장 많이 거친 것 = 완전한 체인이므로 그것만 남깁니다.
+        best = {}
+        for c in pending:
+            k = c["unet"]
+            if k not in best or c["n"] > best[k]["n"]:
+                best[k] = c
+        for c in best.values():
+            chains.append({"sampler": c["sampler"], "unet": c["unet"],
+                           "loras": c["loras"]})
 
         for nid, n in nodes.items():
             t = n.get("type") or ""
