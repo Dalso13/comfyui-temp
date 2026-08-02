@@ -19,7 +19,7 @@
 # ---------------------------------------------------------------------------					
 common	-	text_encoders	umt5_xxl_fp8_e4m3fn_scaled.safetensors	https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors	6735906897
 common	-	vae	wan_2.1_vae.safetensors	https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/vae/wan_2.1_vae.safetensors	253815318
-common	-	clip_vision	clip_vision_h.safetensors	https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/clip_vision/clip_vision_h.safetensors	1264219396
+realistic	-	clip_vision	clip_vision_h.safetensors	https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/clip_vision/clip_vision_h.safetensors	1264219396
 #					
 # ---------------------------------------------------------------------------					
 # ANIME — 이미지+프롬프트 -> 영상					
@@ -37,7 +37,8 @@ anime	high	loras	wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors	https
 #					
 # 애니 스타일 LoRA (Civitai). Civitai 직접 링크는 세션마다 깨지기 쉬우므로					
 # 수동으로 1회 받아 본인이 통제하는 저장소에 올리고 그 URL 을 넣으세요.					
-anime	low	loras	anime_style_wan22_i2v_lownoise_v2.safetensors	https://civitai.com/api/download/models/2516839	0
+anime	low	loras	anime_style_wan22_i2v_lownoise_v2.safetensors	https://civitai.com/api/download/models/2516839	153453632
+anime	low	loras	POSE_SFW-22-H-e8.safetensors	https://civitai.com/api/download/models/2073605	0
 #					
 # ---------------------------------------------------------------------------					
 # REALISTIC — 영상+이미지 -> 인물 교체					

@@ -38,6 +38,7 @@ anime	high	loras	wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors	https
 # 애니 스타일 LoRA (Civitai). Civitai 직접 링크는 세션마다 깨지기 쉬우므로					
 # 수동으로 1회 받아 본인이 통제하는 저장소에 올리고 그 URL 을 넣으세요.					
 anime	low	loras	anime_style_wan22_i2v_lownoise_v2.safetensors	https://civitai.com/api/download/models/2516839	153453632
+anime	low	loras	POSE_SFW-22-H-e8.safetensors	https://civitai.com/api/download/models/2073605	613516752
 #					
 # ---------------------------------------------------------------------------					
 # REALISTIC — 영상+이미지 -> 인물 교체					
