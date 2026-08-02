@@ -1,0 +1,2 @@
+wget --header="Authorization: Bearer $CIVITAI_TOKEN" -O /tmp/pose.bin "https://civitai.com/api/download/models/2073605"
+ls -l /tmp/pose.bin
