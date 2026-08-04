@@ -69,7 +69,9 @@ NODES_REALISTIC=(
   "ComfyUI-segment-anything-2|https://github.com/kijai/ComfyUI-segment-anything-2.git|"
 )
 # 애니 트랙은 내장 템플릿만 쓰므로 추가 노드가 없습니다.
-NODES_ANIME=()
+NODES_ANIME=(
+  "ComfyUI-VideoHelperSuite|https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git|"
+)
 
 # ===========================================================================
 TRACK=""
