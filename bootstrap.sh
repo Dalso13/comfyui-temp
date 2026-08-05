@@ -68,10 +68,22 @@ NODES_REALISTIC=(
   "comfyui_controlnet_aux|https://github.com/Fannovel16/comfyui_controlnet_aux.git|"
   "ComfyUI-segment-anything-2|https://github.com/kijai/ComfyUI-segment-anything-2.git|"
 )
-# 애니 트랙은 내장 템플릿만 쓰므로 추가 노드가 없습니다.
+# 애니 트랙: DaSiWa 워크플로우가 요구하는 노드팩입니다.
+# KJNodes 는 RunPod 템플릿에 이미 설치돼 있어 보통 "= (기존)" 으로 넘어가지만,
+# 다른 이미지로 옮겨도 동작하도록 명시해 둡니다.
 NODES_ANIME=(
   "ComfyUI-VideoHelperSuite|https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git|"
+  "rgthree-comfy|https://github.com/rgthree/rgthree-comfy.git|"
+  "comfyui-WhiteRabbit|https://github.com/Artificial-Sweetener/comfyui-WhiteRabbit.git|"
+  "ComfyUI-KJNodes|https://github.com/kijai/ComfyUI-KJNodes.git|"
+  "ComfyUI-GGUF|https://github.com/city96/ComfyUI-GGUF.git|"
+  "ComfyUI-DaSiWa-Nodes|https://github.com/darksidewalker/ComfyUI-DaSiWa-Nodes.git|"
+  "ComfyUI-LTXVideo|https://github.com/Lightricks/ComfyUI-LTXVideo.git|"
 )
+# WhiteRabbit 이 requirements.txt 외에 별도로 요구하는 패키지.
+# 빠지면 노드가 조용히 import 에러를 냅니다.
+EXTRA_PIP_ANIME=(packaging torchlanc)
+EXTRA_PIP_REALISTIC=()
 
 # ===========================================================================
 TRACK=""
@@ -124,7 +136,7 @@ log "=========================================================="
 
 # CRLF 방어. 읽기용 정규화 사본에서만 파싱합니다.
 NORM="$(mktemp)"; PLAN="$(mktemp)"
-trap 'rm -f "$NORM" "$PLAN"' EXIT
+trap 'rm -f "$NORM" "$PLAN" "${CONSTRAINT:-}"' EXIT
 if grep -q $'\r' "$MANIFEST"; then
   warn "매니페스트가 CRLF 입니다. 읽기는 정규화하지만 .gitattributes 로 LF 를 강제하세요."
 fi
@@ -292,6 +304,47 @@ if ! "$PY" -m pip install --dry-run --quiet --no-input pip >/dev/null 2>&1; then
     log "      pip: --break-system-packages 사용 (시스템 파이썬)"
   fi
 fi
+
+# ---------------------------------------------------------------------------
+# torch 보호 (제약 파일)
+#
+# comfyui_controlnet_aux 의 requirements.txt 는 첫 줄이 핀 없는 `torch` 이고
+# torchvision 도 들어 있습니다. 이대로 pip 에 넘기면 PyPI 기본 wheel 을
+# 가져오는데, 그 wheel 이 이 호스트 드라이버와 다른 CUDA 로 빌드돼 있으면
+# ComfyUI 가 통째로 기동 불능이 됩니다.
+#   RuntimeError: The NVIDIA driver on your system is too old (found version 12080)
+#
+# 이미 설치된 torch 계열 버전을 제약 파일로 고정해 두면, pip 는 그 요구를
+# "이미 충족됨"으로 처리하고 나머지 의존성만 설치합니다.
+# CUDA 버전이 무엇이든 무관해지고 템플릿을 바꿀 필요도 없습니다.
+# ---------------------------------------------------------------------------
+CONSTRAINT=""
+build_constraint() {
+  local f; f="$(mktemp)"
+  "$PY" - <<'PYEOF' > "$f" 2>/dev/null
+import importlib.metadata as md
+# 이 패키지들은 CUDA 빌드에 묶여 있어 교체되면 안 됩니다.
+GUARD = ("torch", "torchvision", "torchaudio", "triton",
+         "xformers", "sageattention", "numpy")
+for name in GUARD:
+    try:
+        print(f"{name}=={md.version(name)}")
+    except md.PackageNotFoundError:
+        pass
+PYEOF
+  if [[ -s "$f" ]]; then
+    echo "$f"
+  else
+    rm -f "$f"; echo ""
+  fi
+}
+
+CONSTRAINT="$(build_constraint)"
+if [[ -n "$CONSTRAINT" ]]; then
+  log "      torch 보호: $(tr '\n' ' ' < "$CONSTRAINT")"
+else
+  warn "torch 버전을 읽지 못했습니다. 노드 의존성 설치가 torch 를 교체할 수 있습니다."
+fi
 if command -v nvidia-smi >/dev/null; then
   log "      GPU: $(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader | head -1)"
 else
@@ -406,16 +459,40 @@ install_node() {
     log "      + $name (신규)"
   fi
   if [[ -f "$dir/requirements.txt" ]]; then
-    if "$PY" -m pip install -q --no-input $PIP_EXTRA -r "$dir/requirements.txt" >>"$LOG" 2>&1; then
+    local before after pipargs=()
+    before="$("$PY" -c 'import torch;print(torch.__version__)' 2>/dev/null || echo "")"
+    [[ -n "$CONSTRAINT" ]] && pipargs+=(--constraint "$CONSTRAINT")
+    if "$PY" -m pip install -q --no-input $PIP_EXTRA "${pipargs[@]+"${pipargs[@]}"}" \
+         -r "$dir/requirements.txt" >>"$LOG" 2>&1; then
       log "        deps ok"
     else
       warn "$name requirements 설치 실패 — 이 노드는 기동 시 import 에러가 날 수 있습니다"
       warn "  로그: grep -A5 'ERROR' $LOG"
     fi
+    # 제약이 뚫렸는지 확인. 여기서 잡지 못하면 다음 증상은 ComfyUI 기동 불능입니다.
+    after="$("$PY" -c 'import torch;print(torch.__version__)' 2>/dev/null || echo "")"
+    if [[ -n "$before" && "$before" != "$after" ]]; then
+      warn "!! torch 가 교체되었습니다: $before -> $after"
+      warn "   ComfyUI 가 기동하지 못할 수 있습니다. 되돌리려면:"
+      warn "   $PY -m pip install $PIP_EXTRA 'torch==$before'"
+    fi
   fi
 }
 
 if [[ $SKIP_NODES -eq 0 ]]; then
+  # ffmpeg — VideoHelperSuite 의 영상 인코딩에 필요합니다. 시스템 패키지라
+  # pip 로는 안 깔리고, 없으면 생성은 되는데 저장 단계에서 실패합니다.
+  if command -v ffmpeg >/dev/null; then
+    log "      ffmpeg: 이미 설치됨"
+  else
+    log "      ffmpeg 설치 중..."
+    if ( apt-get update -qq && apt-get install -y -qq ffmpeg ) >>"$LOG" 2>&1; then
+      log "      ffmpeg 설치 완료"
+    else
+      warn "ffmpeg 설치 실패 — 영상 저장(VHS) 단계에서 실패할 수 있습니다"
+    fi
+  fi
+
   mkdir -p "$COMFY/custom_nodes"
   nodes=("${NODES_COMMON[@]}")
   [[ "$TRACK" == "realistic" || "$TRACK" == "both" ]] && nodes+=("${NODES_REALISTIC[@]}")
@@ -425,6 +502,22 @@ if [[ $SKIP_NODES -eq 0 ]]; then
     IFS='|' read -r n r c <<< "$spec"
     install_node "$n" "$r" "$c"
   done
+
+  # 노드팩이 requirements.txt 에 안 적어둔 추가 패키지
+  extras=()
+  [[ "$TRACK" == "anime"     || "$TRACK" == "both" ]] && extras+=("${EXTRA_PIP_ANIME[@]:-}")
+  [[ "$TRACK" == "realistic" || "$TRACK" == "both" ]] && extras+=("${EXTRA_PIP_REALISTIC[@]:-}")
+  extras=($(printf '%s\n' "${extras[@]:-}" | grep -v '^$' | sort -u))
+  if [[ ${#extras[@]} -gt 0 ]]; then
+    cargs=()
+    [[ -n "$CONSTRAINT" ]] && cargs+=(--constraint "$CONSTRAINT")
+    if "$PY" -m pip install -q --no-input $PIP_EXTRA "${cargs[@]+"${cargs[@]}"}" \
+         "${extras[@]}" >>"$LOG" 2>&1; then
+      log "      추가 패키지 ok: ${extras[*]}"
+    else
+      warn "추가 패키지 설치 실패: ${extras[*]}"
+    fi
+  fi
 else
   log "      커스텀 노드 설치 건너뜀"
 fi
