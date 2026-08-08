@@ -37,8 +37,8 @@ realistic	-	clip_vision	clip_vision_h.safetensors	https://huggingface.co/Comfy-O
 #					
 # 애니 스타일 LoRA (Civitai). Civitai 직접 링크는 세션마다 깨지기 쉬우므로					
 # 수동으로 1회 받아 본인이 통제하는 저장소에 올리고 그 URL 을 넣으세요.					
-# anime	low	loras	anime_style_wan22_i2v_lownoise_v2.safetensors	https://civitai.com/api/download/models/2516839	153453632
-# anime	low	loras	NSFW-22-H-e8.safetensors	https://civitai.com/api/download/models/2073605	613516752
+anime	high	diffusion_models	DasiwaWAN22I2V14BLightspeed_snatchkissHighV11.safetensors	https://huggingface.co/dalso/dasiwa/resolve/main/DasiwaWAN22I2V14BLightspeed_snatchkissHighV11.safetensors	14528782272
+anime	low	diffusion_models	DasiwaWAN22I2V14BLightspeed_snatchkissLowV11.safetensors	https://huggingface.co/dalso/dasiwa/resolve/main/DasiwaWAN22I2V14BLightspeed_snatchkissLowV11.safetensors	14528782272
 #					
 # ---------------------------------------------------------------------------					
 # REALISTIC — 영상+이미지 -> 인물 교체					

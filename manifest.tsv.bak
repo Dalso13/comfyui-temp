@@ -27,18 +27,18 @@ realistic	-	clip_vision	clip_vision_h.safetensors	https://huggingface.co/Comfy-O
 # Lightning LoRA 는 Wan 2.2 네이티브를 씁니다. 실사 트랙의					
 # lightx2v_I2V_14B_480p... 는 Wan 2.1 기반이라 2.2 모델에 물리면 안 됩니다.					
 # ---------------------------------------------------------------------------					
-anime	high	diffusion_models	wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors	https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/diffusion_models/wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors	14294742832
-anime	low	diffusion_models	wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors	https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/diffusion_models/wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors	14294742832
-anime	low	loras	wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors	https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors	1226977424
+# anime	high	diffusion_models	wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors	https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/diffusion_models/wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors	14294742832
+# anime	low	diffusion_models	wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors	https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/diffusion_models/wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors	14294742832
+# anime	low	loras	wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors	https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors	1226977424
 #					
 # high_noise 짝이 같은 폴더에 있는지 확인 필요. 주석을 해제하고 검증을					
 # 돌려보세요. FAIL 이면 존재하지 않는 것이니 다시 주석 처리하면 됩니다.					
-anime	high	loras	wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors	https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors	1226977424
+# anime	high	loras	wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors	https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors	1226977424
 #					
 # 애니 스타일 LoRA (Civitai). Civitai 직접 링크는 세션마다 깨지기 쉬우므로					
 # 수동으로 1회 받아 본인이 통제하는 저장소에 올리고 그 URL 을 넣으세요.					
-anime	low	loras	anime_style_wan22_i2v_lownoise_v2.safetensors	https://civitai.com/api/download/models/2516839	153453632
-anime	low	loras	POSE_SFW-22-H-e8.safetensors	https://civitai.com/api/download/models/2073605	0
+anime	high	diffusion_models	DasiwaWAN22I2V14BLightspeed_snatchkissHighV11.safetensors	https://huggingface.co/dalso/dasiwa/resolve/main/DasiwaWAN22I2V14BLightspeed_snatchkissHighV11.safetensors	0
+anime	low	diffusion_models	DasiwaWAN22I2V14BLightspeed_snatchkissLowV11.safetensors	https://huggingface.co/dalso/dasiwa/resolve/main/DasiwaWAN22I2V14BLightspeed_snatchkissLowV11.safetensors	0
 #					
 # ---------------------------------------------------------------------------					
 # REALISTIC — 영상+이미지 -> 인물 교체					
