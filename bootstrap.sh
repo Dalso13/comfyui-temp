@@ -324,29 +324,39 @@ fi
 # ---------------------------------------------------------------------------
 CONSTRAINT=""
 build_constraint() {
-  local f out
-  f="$(mktemp)"
-  # stdin 히어독 대신 -c 를 씁니다. 히어독은 호출 문맥에 따라 stdin 이
-  # 이미 소비된 경우 조용히 빈 결과를 내놓습니다.
-  # 에러는 /dev/null 이 아니라 로그로 보냅니다 — 조용한 실패가 가장 나쁩니다.
-  out="$("$PY" -c '
+  local f py out
+  f="$(mktemp)"; py="$(mktemp --suffix=.py)"
+
+  # 인라인 -c 는 따옴표/개행 처리가 환경마다 달라 조용히 빈 결과를 냅니다.
+  # 임시 .py 파일로 넘겨 그 변수를 제거합니다.
+  cat > "$py" <<'PYEOF'
+import sys
 import importlib.metadata as md
-GUARD = ("torch","torchvision","torchaudio","triton",
-         "xformers","sageattention","numpy")
+GUARD = ("torch", "torchvision", "torchaudio", "triton",
+         "xformers", "sageattention", "numpy")
+found = 0
 for n in GUARD:
     try:
         print(n + "==" + md.version(n))
+        found += 1
     except Exception:
         pass
-' 2>>"$LOG")"
+if not found:
+    sys.stderr.write("interpreter=%s\n" % sys.executable)
+    sys.stderr.write("prefix=%s base=%s\n" % (sys.prefix, sys.base_prefix))
+    sys.stderr.write("sys.path=%r\n" % (sys.path,))
+PYEOF
 
-  # 폴백: metadata 로 못 읽으면 모듈에서 직접 버전을 얻습니다.
-  # venv 가 system-site-packages 를 공유하는 구성에서 유용합니다.
+  out="$("$PY" "$py" 2>>"$LOG")"
+
+  # 2차: pip list (metadata 경로 문제를 우회)
   if [[ -z "$out" ]]; then
-    warn "metadata 로 버전을 못 읽어 폴백을 시도합니다"
-    out="$("$PY" -c 'import torch; print("torch=="+torch.__version__)' 2>>"$LOG")"
+    warn "metadata 로 못 읽어 pip list 로 재시도합니다"
+    out="$("$PY" -m pip list --format=freeze 2>>"$LOG" \
+          | grep -iE '^(torch|torchvision|torchaudio|triton|xformers|sageattention|numpy)==' || true)"
   fi
 
+  rm -f "$py"
   if [[ -n "$out" ]]; then
     printf '%s\n' "$out" > "$f"
     echo "$f"
@@ -358,8 +368,14 @@ for n in GUARD:
 CONSTRAINT="$(build_constraint)"
 if [[ -n "$CONSTRAINT" ]]; then
   log "      torch 보호: $(tr '\n' ' ' < "$CONSTRAINT")"
+  # pip 이 직접 읽는 환경변수로도 걸어둡니다. --constraint 인자를 놓치는
+  # 경로가 있어도 이쪽이 잡습니다 (이중 안전장치).
+  export PIP_CONSTRAINT="$CONSTRAINT"
 else
   warn "torch 버전을 읽지 못했습니다. 노드 의존성 설치가 torch 를 교체할 수 있습니다."
+  warn "  수동 우회: $PY -m pip list --format=freeze | grep -i '^torch==' > /tmp/c.txt"
+  warn "            export PIP_CONSTRAINT=/tmp/c.txt   (그 뒤 부트스트랩 재실행)"
+  warn "  진단은 로그를 보세요: grep -A5 'interpreter=' $LOG"
 fi
 if command -v nvidia-smi >/dev/null; then
   log "      GPU: $(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader | head -1)"
