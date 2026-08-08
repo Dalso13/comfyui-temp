@@ -101,6 +101,7 @@ QUIET_DL=0
 DRY=0
 NO_RESTART=0
 NODES_CHANGED=0
+rc=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -633,21 +634,29 @@ restart_comfy() {
   #   (3) 작업 디렉토리가 ComfyUI 하위
   # 인 것만 고릅니다.
   find_comfy_pids() {
-    local d exe cwd tok hit
+    local d exe cwd tok script
     for d in /proc/[0-9]*; do
       [[ "${d#/proc/}" == "$$" || "${d#/proc/}" == "$PPID" ]] && continue
       # 실행 파일이 python 이어야 합니다. 명령행에 문자열만 있는 셸을
       # 걸러내려면 이 검사가 필수입니다 (자기 자신을 죽이는 사고 방지).
       exe="$(readlink -f "$d/exe" 2>/dev/null)" || continue
       [[ "$(basename "${exe:-}")" == python* ]] || continue
-      # argv 토큰 중 하나가 정확히 main.py 여야 합니다 (부분 문자열 아님)
-      hit=0
-      while IFS= read -r -d '' tok; do
-        [[ "$tok" == "main.py" || "$tok" == */main.py ]] && { hit=1; break; }
-      done < "$d/cmdline" 2>/dev/null
-      [[ $hit -eq 1 ]] || continue
+
+      # argv 에서 main.py 토큰을 찾고, 그것을 실제 경로로 해석합니다.
+      # cwd 만 보면 템플릿이 상위 디렉토리에서 `python ComfyUI/main.py` 로
+      # 띄운 경우를 놓칩니다 (실제로 겪은 탐지 실패).
+      script=""
       cwd="$(readlink -f "$d/cwd" 2>/dev/null)"
-      [[ "$cwd" == "$COMFY"* ]] || continue
+      while IFS= read -r -d '' tok; do
+        case "$tok" in
+          /*main.py)  script="$tok"; break ;;
+          *main.py)   script="${cwd%/}/$tok"; break ;;
+        esac
+      done < "$d/cmdline" 2>/dev/null
+      [[ -n "$script" ]] || continue
+
+      script="$(readlink -f "$script" 2>/dev/null)"
+      [[ "$script" == "$(readlink -f "$COMFY")/main.py" ]] || continue
       echo "${d#/proc/}"
     done
   }
