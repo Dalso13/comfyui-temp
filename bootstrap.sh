@@ -19,6 +19,7 @@
 #   --skip-nodes   커스텀 노드 설치 건너뛰기 (모델만 다시 받을 때)
 #   --update-comfy ComfyUI git pull 시도 (기본 꺼짐 — 아래 설명 참고)
 #   --quiet-dl     다운로드 진행률 표시 끄기
+#   --no-restart   새 노드를 설치해도 ComfyUI 를 재시작하지 않음
 #   --dry-run      실제 다운로드/설치 없이 계획만 출력
 #
 # ComfyUI 업데이트가 기본 꺼짐인 이유:
@@ -93,6 +94,8 @@ SKIP_NODES=0
 UPDATE_COMFY=0
 QUIET_DL=0
 DRY=0
+NO_RESTART=0
+NODES_CHANGED=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -103,6 +106,7 @@ while [[ $# -gt 0 ]]; do
     --update-comfy) UPDATE_COMFY=1; shift ;;
     --skip-update)  shift ;;   # 하위호환: 이제 기본이 건너뛰기라 무시
     --quiet-dl)     QUIET_DL=1; shift ;;
+    --no-restart)   NO_RESTART=1; shift ;;
     --dry-run)      DRY=1; shift ;;
     -h|--help)      sed -n '2,40p' "$0"; exit 0 ;;
     *) echo "알 수 없는 인자: $1" >&2; exit 2 ;;
@@ -320,19 +324,31 @@ fi
 # ---------------------------------------------------------------------------
 CONSTRAINT=""
 build_constraint() {
-  local f; f="$(mktemp)"
-  "$PY" - <<'PYEOF' > "$f" 2>/dev/null
+  local f out
+  f="$(mktemp)"
+  # stdin 히어독 대신 -c 를 씁니다. 히어독은 호출 문맥에 따라 stdin 이
+  # 이미 소비된 경우 조용히 빈 결과를 내놓습니다.
+  # 에러는 /dev/null 이 아니라 로그로 보냅니다 — 조용한 실패가 가장 나쁩니다.
+  out="$("$PY" -c '
 import importlib.metadata as md
-# 이 패키지들은 CUDA 빌드에 묶여 있어 교체되면 안 됩니다.
-GUARD = ("torch", "torchvision", "torchaudio", "triton",
-         "xformers", "sageattention", "numpy")
-for name in GUARD:
+GUARD = ("torch","torchvision","torchaudio","triton",
+         "xformers","sageattention","numpy")
+for n in GUARD:
     try:
-        print(f"{name}=={md.version(name)}")
-    except md.PackageNotFoundError:
+        print(n + "==" + md.version(n))
+    except Exception:
         pass
-PYEOF
-  if [[ -s "$f" ]]; then
+' 2>>"$LOG")"
+
+  # 폴백: metadata 로 못 읽으면 모듈에서 직접 버전을 얻습니다.
+  # venv 가 system-site-packages 를 공유하는 구성에서 유용합니다.
+  if [[ -z "$out" ]]; then
+    warn "metadata 로 버전을 못 읽어 폴백을 시도합니다"
+    out="$("$PY" -c 'import torch; print("torch=="+torch.__version__)' 2>>"$LOG")"
+  fi
+
+  if [[ -n "$out" ]]; then
+    printf '%s\n' "$out" > "$f"
     echo "$f"
   else
     rm -f "$f"; echo ""
@@ -457,6 +473,7 @@ install_node() {
     git clone -q "$repo" "$dir" >>"$LOG" 2>&1 || { warn "$name clone 실패"; return 1; }
     [[ -n "$commit" ]] && ( cd "$dir" && git checkout -q "$commit" ) >>"$LOG" 2>&1
     log "      + $name (신규)"
+    NODES_CHANGED=1     # 새로 깔렸으면 ComfyUI 재시작이 필요합니다
   fi
   if [[ -f "$dir/requirements.txt" ]]; then
     local before after pipargs=()
@@ -571,6 +588,58 @@ rm -f "$FAIL_FLAG"
     printf '%-32s %s\n' "$(basename "$d")" "$( (cd "$d" && git rev-parse --short HEAD) 2>/dev/null )"
   done
 } | tee -a "$LOG"
+
+# ===========================================================================
+# 7. ComfyUI 재시작
+#
+# 커스텀 노드는 ComfyUI 기동 시점에 로드됩니다. 실행 중인 프로세스에 나중에
+# 설치하면 UI 에서 "누락된 노드"로 계속 표시되고, deps ok 여도 소용없습니다.
+# 새로 설치된 노드가 있을 때만 재시작합니다.
+# ===========================================================================
+restart_comfy() {
+  local pid args
+  pid="$(pgrep -f "$COMFY/main.py" | head -1)"
+  [[ -z "$pid" ]] && pid="$(pgrep -f 'main.py' | head -1)"
+  if [[ -z "$pid" ]]; then
+    warn "실행 중인 ComfyUI 를 찾지 못했습니다. 수동으로 시작하세요."
+    return 1
+  fi
+
+  # 원래 실행 인자를 그대로 재사용합니다 (템플릿마다 포트/옵션이 다릅니다)
+  args="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)"
+  if [[ -z "$args" ]]; then
+    warn "실행 인자를 읽지 못했습니다. 수동으로 재시작하세요."
+    return 1
+  fi
+  log "      기존 프로세스 종료 (pid $pid)"
+  kill "$pid" 2>/dev/null
+  local i
+  for i in $(seq 1 20); do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 1
+  done
+  kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null
+  sleep 2
+
+  ( cd "$COMFY" && nohup $args > "$LOG_DIR/comfyui_${STAMP}.log" 2>&1 & )
+  sleep 8
+  if pgrep -f 'main.py' >/dev/null; then
+    log "      ComfyUI 재시작 완료"
+    log "      기동 로그: $LOG_DIR/comfyui_${STAMP}.log"
+    return 0
+  fi
+  warn "재시작 확인 실패. 로그를 보세요: $LOG_DIR/comfyui_${STAMP}.log"
+  return 1
+}
+
+if [[ $DRY -eq 0 && $NO_RESTART -eq 0 && $NODES_CHANGED -eq 1 ]]; then
+  log ""
+  log "[7/7] 새 노드가 설치되어 ComfyUI 를 재시작합니다"
+  restart_comfy || true
+elif [[ $NODES_CHANGED -eq 1 ]]; then
+  log ""
+  warn "새 노드가 설치되었습니다. ComfyUI 를 수동으로 재시작해야 인식됩니다."
+fi
 
 log ""
 log "=========================================================="
