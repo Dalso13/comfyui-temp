@@ -593,42 +593,42 @@ fi
 # ===========================================================================
 # 6. 다운로드 완료 대기 + 검증
 # ===========================================================================
-# log ""
-# log "[6/6] 다운로드 완료 대기"
-# rc=0
-# if [[ -n "$DISPATCH_PID" ]]; then
-#   wait "$DISPATCH_PID" || rc=1
-# fi
+log ""
+log "[6/6] 다운로드 완료 대기"
+rc=0
+if [[ -n "$DISPATCH_PID" ]]; then
+  wait "$DISPATCH_PID" || rc=1
+fi
 
-# # 실측 처리량 기록. 다음 세션의 GPU/리전 선택과 --jobs 조정 근거가 됩니다.
-# ELAPSED=$(( $(date +%s) - START_EPOCH ))
-# if [[ $need_bytes -gt 0 && $ELAPSED -gt 0 ]]; then
-#   log "      소요 $((ELAPSED/60))분 $((ELAPSED%60))초 / 평균 $(awk -v b="$need_bytes" -v s="$ELAPSED" 'BEGIN{printf "%.1f", b/s/1048576}') MB/s"
-# fi
+# 실측 처리량 기록. 다음 세션의 GPU/리전 선택과 --jobs 조정 근거가 됩니다.
+ELAPSED=$(( $(date +%s) - START_EPOCH ))
+if [[ $need_bytes -gt 0 && $ELAPSED -gt 0 ]]; then
+  log "      소요 $((ELAPSED/60))분 $((ELAPSED%60))초 / 평균 $(awk -v b="$need_bytes" -v s="$ELAPSED" 'BEGIN{printf "%.1f", b/s/1048576}') MB/s"
+fi
 
-# if [[ -s "$FAIL_FLAG" ]]; then
-#   log ""
-#   log "실패한 항목:"
-#   sed 's/^/  - /' "$FAIL_FLAG" | tee -a "$LOG"
-#   log ""
-#   log "이 스크립트는 멱등합니다. 그대로 다시 실행하면 받은 것은 건너뛰고"
-#   log "실패분만 이어받습니다."
-#   rm -f "$FAIL_FLAG"
-#   exit 1
-# fi
-# rm -f "$FAIL_FLAG"
+if [[ -s "$FAIL_FLAG" ]]; then
+  log ""
+  log "실패한 항목:"
+  sed 's/^/  - /' "$FAIL_FLAG" | tee -a "$LOG"
+  log ""
+  log "이 스크립트는 멱등합니다. 그대로 다시 실행하면 받은 것은 건너뛰고"
+  log "실패분만 이어받습니다."
+  rm -f "$FAIL_FLAG"
+  exit 1
+fi
+rm -f "$FAIL_FLAG"
 
-# # 버전 기록 — "항상 최신" 정책의 대가를 상환하는 부분입니다.
-# # 카나리 결과가 달라졌을 때 무엇이 바뀌었는지 여기서 답이 나옵니다.
-# {
-#   echo ""
-#   echo "--- 버전 스냅샷 ($(date '+%F %T')) ---"
-#   echo "ComfyUI: $( (cd "$COMFY" && git rev-parse --short HEAD) 2>/dev/null || echo 'n/a' )"
-#   for d in "$COMFY"/custom_nodes/*/; do
-#     [[ -d "$d/.git" ]] || continue
-#     printf '%-32s %s\n' "$(basename "$d")" "$( (cd "$d" && git rev-parse --short HEAD) 2>/dev/null )"
-#   done
-# } | tee -a "$LOG"
+# 버전 기록 — "항상 최신" 정책의 대가를 상환하는 부분입니다.
+# 카나리 결과가 달라졌을 때 무엇이 바뀌었는지 여기서 답이 나옵니다.
+{
+  echo ""
+  echo "--- 버전 스냅샷 ($(date '+%F %T')) ---"
+  echo "ComfyUI: $( (cd "$COMFY" && git rev-parse --short HEAD) 2>/dev/null || echo 'n/a' )"
+  for d in "$COMFY"/custom_nodes/*/; do
+    [[ -d "$d/.git" ]] || continue
+    printf '%-32s %s\n' "$(basename "$d")" "$( (cd "$d" && git rev-parse --short HEAD) 2>/dev/null )"
+  done
+} | tee -a "$LOG"
 
 # ===========================================================================
 # 7. ComfyUI 재시작
