@@ -385,6 +385,21 @@ else
 fi
 if command -v nvidia-smi >/dev/null; then
   log "      GPU: $(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader | head -1)"
+
+  # 드라이버가 지원하는 CUDA 와 torch 빌드가 어긋나면 ComfyUI 가 아예 뜨지 않습니다.
+  #   RuntimeError: The NVIDIA driver on your system is too old (found version 12080)
+  # 다운로드 30분을 태운 뒤에 알게 되면 손해가 크므로 여기서 미리 경고합니다.
+  DRV_CUDA="$(nvidia-smi 2>/dev/null | sed -n 's/.*CUDA Version: *\([0-9.]*\).*/\1/p' | head -1)"
+  TORCH_CUDA="$("$PY" -c 'import torch,sys; v=getattr(torch.version,"cuda",None); sys.stdout.write(v or "")' 2>/dev/null)"
+  if [[ -n "$DRV_CUDA" && -n "$TORCH_CUDA" ]]; then
+    log "      CUDA: 드라이버 $DRV_CUDA / torch 빌드 $TORCH_CUDA"
+    if awk -v d="$DRV_CUDA" -v t="$TORCH_CUDA" 'BEGIN{exit !(d+0 < t+0)}'; then
+      warn "드라이버 CUDA($DRV_CUDA) 가 torch 빌드($TORCH_CUDA) 보다 낮습니다."
+      warn "  이 조합에서는 ComfyUI 기동 시 'driver is too old' 로 크래시합니다."
+      warn "  Pod 을 드라이버에 맞는 템플릿(예: cuda${TORCH_CUDA%%.*} 대신 cuda${DRV_CUDA})"
+      warn "  으로 다시 배포하거나, 다른 호스트/리전으로 옮기세요."
+    fi
+  fi
 else
   warn "nvidia-smi 없음. GPU 미인식 상태일 수 있습니다."
 fi
@@ -674,6 +689,15 @@ restart_comfy() {
     warn "실행 인자를 읽지 못했습니다. 수동으로 재시작하세요."
     return 1
   fi
+
+  # 첫 토큰(인터프리터)을 절대경로로 교체합니다.
+  # 원래 프로세스는 venv 가 활성화된 셸에서 `python main.py` 로 떴을 수 있는데,
+  # 그 PATH 가 없는 여기서 그대로 재사용하면 이렇게 죽습니다:
+  #   nohup: failed to run command 'python': No such file or directory
+  local rest
+  rest="${args#* }"                      # 첫 토큰을 뗀 나머지 인자
+  args="$PY $rest"
+  log "      재기동 명령: $args"
   log "      기존 프로세스 종료: $(printf '%s' "$pids" | tr '\n' ' ')"
 
   printf '%s\n' "$pids" | xargs -r kill 2>/dev/null
