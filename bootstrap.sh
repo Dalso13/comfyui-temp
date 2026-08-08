@@ -81,9 +81,14 @@ NODES_ANIME=(
   "ComfyUI-DaSiWa-Nodes|https://github.com/darksidewalker/ComfyUI-DaSiWa-Nodes.git|"
   "ComfyUI-LTXVideo|https://github.com/Lightricks/ComfyUI-LTXVideo.git|"
 )
-# WhiteRabbit 이 requirements.txt 외에 별도로 요구하는 패키지.
-# 빠지면 노드가 조용히 import 에러를 냅니다.
-EXTRA_PIP_ANIME=(packaging torchlanc)
+# 노드팩이 requirements.txt 에 안 적어둔 추가 패키지.
+#   packaging, torchlanc : WhiteRabbit 이 별도로 요구
+#   kornia==0.8.2        : LTXVideo 가 kornia.geometry.transform.pyramid 의
+#                          `pad` 를 쓰는데, kornia 0.8.3 이 그 import 를 없애서
+#                          IMPORT FAILED 가 납니다. 0.8.2 가 마지막 호환 버전입니다.
+#                          템플릿이 시스템에 0.8.3 을 깔아두므로 venv 에 강제
+#                          설치해야 우선합니다 (install_extras 의 --ignore-installed).
+EXTRA_PIP_ANIME=(packaging torchlanc "kornia==0.8.2")
 EXTRA_PIP_REALISTIC=()
 
 # ===========================================================================
@@ -544,8 +549,12 @@ if [[ $SKIP_NODES -eq 0 ]]; then
   if [[ ${#extras[@]} -gt 0 ]]; then
     cargs=()
     [[ -n "$CONSTRAINT" ]] && cargs+=(--constraint "$CONSTRAINT")
+    # --ignore-installed: venv 가 system-site-packages 를 공유하면 시스템에
+    #   이미 있는 버전 때문에 "already satisfied" 로 건너뜁니다. 버전을 고정해야
+    #   하는 패키지(kornia 등)는 venv 안에 따로 넣어야 우선합니다.
+    # --no-deps: 의존성 재해석으로 torch 계열을 건드리지 않게 막습니다.
     if "$PY" -m pip install -q --no-input $PIP_EXTRA "${cargs[@]+"${cargs[@]}"}" \
-         "${extras[@]}" >>"$LOG" 2>&1; then
+         --ignore-installed --no-deps "${extras[@]}" >>"$LOG" 2>&1; then
       log "      추가 패키지 ok: ${extras[*]}"
     else
       warn "추가 패키지 설치 실패: ${extras[*]}"
@@ -613,45 +622,103 @@ fi
 # 새로 설치된 노드가 있을 때만 재시작합니다.
 # ===========================================================================
 restart_comfy() {
-  local pid args
-  pid="$(pgrep -f "$COMFY/main.py" | head -1)"
-  [[ -z "$pid" ]] && pid="$(pgrep -f 'main.py' | head -1)"
-  if [[ -z "$pid" ]]; then
+  local pids args p i
+
+  # ComfyUI 는 보통 `python main.py`(상대경로)로 실행됩니다. 절대경로 패턴만
+  # 찾으면 놓치고, 그러면 새 프로세스가 포트 충돌로 즉시 죽습니다.
+  #   [ERROR] Port 8188 is already in use
+  # 반대로 `pgrep -f main.py` 처럼 넓게 잡으면 명령행에 그 문자열이 들어간
+  # 셸까지 죽입니다(실제로 겪음). 그래서 /proc 을 직접 훑어
+  #   (1) python 프로세스이고 (2) main.py 를 실행 중이며
+  #   (3) 작업 디렉토리가 ComfyUI 하위
+  # 인 것만 고릅니다.
+  find_comfy_pids() {
+    local d exe cwd tok hit
+    for d in /proc/[0-9]*; do
+      [[ "${d#/proc/}" == "$$" || "${d#/proc/}" == "$PPID" ]] && continue
+      # 실행 파일이 python 이어야 합니다. 명령행에 문자열만 있는 셸을
+      # 걸러내려면 이 검사가 필수입니다 (자기 자신을 죽이는 사고 방지).
+      exe="$(readlink -f "$d/exe" 2>/dev/null)" || continue
+      [[ "$(basename "${exe:-}")" == python* ]] || continue
+      # argv 토큰 중 하나가 정확히 main.py 여야 합니다 (부분 문자열 아님)
+      hit=0
+      while IFS= read -r -d '' tok; do
+        [[ "$tok" == "main.py" || "$tok" == */main.py ]] && { hit=1; break; }
+      done < "$d/cmdline" 2>/dev/null
+      [[ $hit -eq 1 ]] || continue
+      cwd="$(readlink -f "$d/cwd" 2>/dev/null)"
+      [[ "$cwd" == "$COMFY"* ]] || continue
+      echo "${d#/proc/}"
+    done
+  }
+
+  pids="$(find_comfy_pids)"
+  if [[ -z "$pids" ]]; then
     warn "실행 중인 ComfyUI 를 찾지 못했습니다. 수동으로 시작하세요."
     return 1
   fi
 
-  # 원래 실행 인자를 그대로 재사용합니다 (템플릿마다 포트/옵션이 다릅니다)
-  args="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)"
-  if [[ -z "$args" ]]; then
+  # 첫 프로세스의 실행 인자를 재사용합니다 (템플릿마다 포트/옵션이 다릅니다)
+  p="$(printf '%s\n' "$pids" | head -1)"
+  args="$(tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null)"
+  if [[ -z "$args" || "$args" != *main.py* ]]; then
     warn "실행 인자를 읽지 못했습니다. 수동으로 재시작하세요."
     return 1
   fi
-  log "      기존 프로세스 종료 (pid $pid)"
-  kill "$pid" 2>/dev/null
-  local i
+  log "      기존 프로세스 종료: $(printf '%s' "$pids" | tr '\n' ' ')"
+
+  printf '%s\n' "$pids" | xargs -r kill 2>/dev/null
   for i in $(seq 1 20); do
-    kill -0 "$pid" 2>/dev/null || break
+    [[ -z "$(find_comfy_pids)" ]] && break
     sleep 1
   done
-  kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null
-  sleep 2
+  if [[ -n "$(find_comfy_pids)" ]]; then
+    warn "정상 종료되지 않아 강제 종료합니다"
+    find_comfy_pids | xargs -r kill -9 2>/dev/null
+    sleep 3
+  fi
+
+  # 포트가 실제로 풀렸는지 확인. 안 풀렸으면 새 인스턴스가 조용히 죽습니다.
+  for i in $(seq 1 10); do
+    (ss -tln 2>/dev/null || netstat -tln 2>/dev/null) | grep -q ':8188 ' || break
+    sleep 1
+  done
 
   ( cd "$COMFY" && nohup $args > "$LOG_DIR/comfyui_${STAMP}.log" 2>&1 & )
-  sleep 8
-  if pgrep -f 'main.py' >/dev/null; then
-    log "      ComfyUI 재시작 완료"
-    log "      기동 로그: $LOG_DIR/comfyui_${STAMP}.log"
-    return 0
-  fi
+
+  # 기동 확인: 포트가 응답할 때까지 최대 90초 대기 (모델 스캔에 시간이 걸립니다)
+  for i in $(seq 1 90); do
+    if curl -s -o /dev/null --max-time 2 "http://127.0.0.1:8188/" 2>/dev/null; then
+      log "      ComfyUI 재시작 완료 ($i 초)"
+      log "      기동 로그: $LOG_DIR/comfyui_${STAMP}.log"
+      return 0
+    fi
+    sleep 1
+  done
+
   warn "재시작 확인 실패. 로그를 보세요: $LOG_DIR/comfyui_${STAMP}.log"
+  warn "  포트 충돌 여부: grep -i 'already in use' $LOG_DIR/comfyui_${STAMP}.log"
   return 1
 }
 
 if [[ $DRY -eq 0 && $NO_RESTART -eq 0 && $NODES_CHANGED -eq 1 ]]; then
   log ""
   log "[7/7] 새 노드가 설치되어 ComfyUI 를 재시작합니다"
-  restart_comfy || true
+  if restart_comfy; then
+    # deps ok 는 pip 설치 성공일 뿐, 노드가 실제로 로드됐다는 뜻이 아닙니다.
+    # 버전 불일치로 import 단계에서 죽는 경우가 실제로 있었습니다
+    # (예: kornia 0.8.3 에서 pyramid.pad 제거 -> LTXVideo IMPORT FAILED).
+    # 여기서 잡지 못하면 UI 에서 "누락된 노드"로만 보여 원인 추적이 어렵습니다.
+    CL="$LOG_DIR/comfyui_${STAMP}.log"
+    if grep -qiE "IMPORT FAILED|Cannot import" "$CL" 2>/dev/null; then
+      log ""
+      warn "일부 노드가 로드에 실패했습니다:"
+      grep -iE "IMPORT FAILED|Cannot import" "$CL" | sed 's/^/  /' | tee -a "$LOG" >&2
+      warn "  원인 확인: grep -B5 'IMPORT FAILED' $CL"
+    else
+      log "      노드 로드 검증: IMPORT FAILED 없음"
+    fi
+  fi
 elif [[ $NODES_CHANGED -eq 1 ]]; then
   log ""
   warn "새 노드가 설치되었습니다. ComfyUI 를 수동으로 재시작해야 인식됩니다."
